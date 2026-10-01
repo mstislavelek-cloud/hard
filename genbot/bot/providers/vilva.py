@@ -46,6 +46,8 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "agent": ("agentSlug", "agent_slug", "agentId", "agent_id"),
     "decision": ("action", "decision", "approval", "approve"),
     "answer": ("response", "answer", "message", "text", "reply"),
+    "answers": ("answers", "responses", "fields", "values", "formAnswers"),
+    "defaults": ("useDefaults", "acceptDefaults", "useAgentChoices", "continueWithDefaults", "skip"),
 }
 
 
@@ -347,11 +349,88 @@ class VilvaProvider:
         else:
             await self.client.call_tool("agent_respond", {"run_id": run_id, "answer": decision})
 
-    async def agent_answer(self, run_id: str, text: str) -> None:
-        await self.client.call_tool("agent_respond", {"run_id": run_id, "answer": text})
+    async def agent_answer(self, run_id: str, text: str, answers: dict[str, str] | None = None,
+                           use_defaults: bool = False) -> None:
+        """Ответ агенту: текстом и, если схема agent_respond это позволяет, структурно по id вопросов."""
+        values: dict[str, Any] = {"run_id": run_id, "answer": text}
+        props = (self.client.schemas.get("agent_respond") or {}).get("properties") or {}
+        name = next((n for n in ALIASES["answers"] if n in props), None)
+        if answers and name:
+            if (props[name] or {}).get("type") == "array":
+                values["answers"] = [{"questionId": k, "answer": v} for k, v in answers.items()]
+            else:
+                values["answers"] = answers
+        if use_defaults and any(n in props for n in ALIASES["defaults"]):
+            values["defaults"] = True
+        await self.client.call_tool("agent_respond", values)
 
     async def agent_cancel(self, run_id: str) -> None:
         await self.client.call_tool("agent_cancel_run", {"run_id": run_id})
+
+
+@dataclass
+class Question:
+    id: str
+    text: str
+    options: list[str] = field(default_factory=list)
+    required: bool = False
+    hint: str = ""
+
+
+QUESTION_TEXT = ("question", "label", "title", "prompt", "text", "name")
+QUESTION_OPTIONS = ("options", "choices", "suggestions", "suggestedAnswers", "answers", "values")
+QUESTION_LISTS = ("questions", "pendingQuestions", "fields", "form")
+
+
+def _option_label(o: Any) -> str:
+    if isinstance(o, dict):
+        return str(o.get("label") or o.get("title") or o.get("text") or o.get("value") or "")
+    return str(o)
+
+
+def _as_question(d: dict, idx: int) -> Question | None:
+    text = next((d[k] for k in QUESTION_TEXT if isinstance(d.get(k), str) and d[k].strip()), None)
+    if not text:
+        return None
+    opts = next((d[k] for k in QUESTION_OPTIONS if isinstance(d.get(k), list)), [])
+    options = [lbl for lbl in (_option_label(o) for o in opts) if lbl]
+    qid = str(d.get("id") or d.get("key") or d.get("questionId") or d.get("name") or idx)
+    hint = d.get("description") or d.get("hint") or d.get("helpText") or ""
+    return Question(qid, text.strip(), options, bool(d.get("required")), hint if isinstance(hint, str) else "")
+
+
+def extract_questions(data: Any) -> list[Question]:
+    """Ищет в ответе agent_get_run вопросы агента: список под questions/fields/… или объекты с options."""
+    found: list[Question] = []
+    seen: set[str] = set()
+
+    def add(q: Question | None) -> None:
+        if q and q.text not in seen:
+            seen.add(q.text)
+            found.append(q)
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for k in QUESTION_LISTS:
+                if isinstance(obj.get(k), list) and obj[k] and all(isinstance(x, dict) for x in obj[k]):
+                    for i, item in enumerate(obj[k]):
+                        add(_as_question(item, len(found) + i))
+            if any(isinstance(obj.get(k), list) for k in QUESTION_OPTIONS) and any(
+                    isinstance(obj.get(k), str) for k in QUESTION_TEXT):
+                add(_as_question(obj, len(found)))
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(data)
+    # Одиночный вопрос строкой: {"status": "waiting_for_input", "question": "..."}
+    if not found and isinstance(data, dict):
+        q = find_key(data, "question", "pendingQuestion")
+        if isinstance(q, str) and q.strip():
+            found.append(Question("0", q.strip()))
+    return found
 
 
 @dataclass
@@ -362,6 +441,8 @@ class AgentState:
     text: str = ""
     credits_used: float | None = None
     urls: list[str] = field(default_factory=list)
+    questions: list[Question] = field(default_factory=list)
+    raw: Any = None
 
     @classmethod
     def from_payload(cls, run_id: str, data: Any) -> "AgentState":
@@ -377,9 +458,13 @@ class AgentState:
             phase = "plan"
         elif "question" in status or "input" in status or "waiting" in status or "awaiting" in status:
             phase = "question"
+        questions = extract_questions(data) if phase not in ("done", "failed", "cancelled") else []
+        if questions and phase in ("running", "plan"):
+            phase = "question"
         text = str(find_key(data, "question", "message", "summary", "output", "result") or "")
         urls = sorted(set(_all_urls(data)), key=lambda u: (not u.lower().split("?")[0].endswith(VIDEO_EXT + IMAGE_EXT), u))
-        return cls(run_id, phase, status, text if isinstance(text, str) else "", _credits_used(data), urls)
+        return cls(run_id, phase, status, text if isinstance(text, str) else "", _credits_used(data), urls,
+                   questions, data)
 
 
 def _all_urls(obj: Any) -> list[str]:

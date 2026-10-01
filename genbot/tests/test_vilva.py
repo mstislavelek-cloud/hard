@@ -74,7 +74,9 @@ def vilva_server(agent_script=None):
             return result(rid, {"runId": "run-1", "status": "queued"})
         if name == "agent_get_run":
             state["run_polls"] += 1
-            if len(script) > 1 and not (script[0].get("status") == "awaiting_approval" and state["approved"] is None):
+            waiting = (script[0].get("status") == "awaiting_approval" and state["approved"] is None) or \
+                "pendingQuestions" in script[0]
+            if len(script) > 1 and not waiting:
                 return result(rid, script.pop(0))
             return result(rid, script[0])
         if name == "agent_get_plan":
@@ -84,6 +86,11 @@ def vilva_server(agent_script=None):
                     script.pop(0)
                 return result(rid, {"ok": True})
             return result(rid, {"steps": [{"title": "5 карточек"}, {"title": "видео-обложка"}], "estimatedCredits": 30})
+        if name == "agent_respond":
+            state["responded"] = args
+            if script and "pendingQuestions" in script[0]:
+                script.pop(0)
+            return result(rid, {"ok": True})
         if name == "agent_cancel_run":
             script[:] = [{"status": "cancelled"}]
             return result(rid, {"ok": True})
@@ -281,3 +288,83 @@ def test_parse_real_list_models_format():
     assert cat.price(nb, {"resolution": "1K"}) == 24
     kling = by["vilva:kling"]
     assert kling.simple["duration"] == "5" and cat.estimate_units(kling, {"duration": "10"}) == 100
+
+
+QUESTIONS = [
+    {"id": "tone", "question": "Тон карточек", "required": True,
+     "options": [{"label": "Минимализм-премиум"}, {"label": "Яркий продающий"}]},
+    {"id": "cover", "question": "Что показываем в обложке?", "required": True,
+     "options": ["Вращение на белом фоне", "Крупный план"]},
+    {"id": "photo", "question": "Есть фото товара?", "required": False, "options": []},
+]
+
+
+def test_extract_questions_from_form():
+    from bot.providers.vilva import extract_questions
+
+    qs = extract_questions({"status": "running", "pendingQuestions": QUESTIONS})
+    assert [q.id for q in qs] == ["tone", "cover", "photo"]
+    assert qs[0].options == ["Минимализм-премиум", "Яркий продающий"] and qs[0].required
+    assert AgentState.from_payload("r", {"status": "running", "pendingQuestions": QUESTIONS}).phase == "question"
+    # план со шагами — не вопросы
+    assert extract_questions({"steps": [{"title": "Собрать вводные"}]}) == []
+
+
+def test_agent_questionnaire_in_bot(h):
+    app, state = vilva_server([
+        {"status": "running", "pendingQuestions": QUESTIONS},
+        {"status": "running"},
+        {"status": "completed", "creditsUsed": 3, "assets": [{"url": "https://cdn.vilva/a.png"}]},
+    ])
+    SCHEMAS["agent_respond"]["properties"]["answers"] = {"type": "object"}
+
+    async def go(base):
+        _agent_harness(h, base)
+        await h.afeed(h.msg("/agent карточки"), h.cb("am:autopilot"), h.cb("ab:0"))
+        for _ in range(300):
+            if any("Когда готово" in t for t in h.session.texts()):
+                break
+            await asyncio.sleep(0.01)
+        q_msgs = [c for c in h.session.calls if isinstance(c, SendMessage) and c.text[:2] in ("1.", "2.", "3.")]
+        assert len(q_msgs) == 3 and "*" in q_msgs[0].text
+        await h.afeed(h.cb(q_msgs[0].reply_markup.inline_keyboard[1][0].callback_data))   # Яркий продающий
+        await h.afeed(h.cb(q_msgs[1].reply_markup.inline_keyboard[0][0].callback_data))   # Вращение
+        await h.afeed(h.cb(q_msgs[2].reply_markup.inline_keyboard[-1][0].callback_data),  # свой вариант
+                      h.msg("фото нет, сгенерируй"))
+        await h.drain()
+        await h.app.vilva.close()
+
+    try:
+        asyncio.run(serve(app, go))
+    finally:
+        SCHEMAS["agent_respond"]["properties"].pop("answers", None)
+    sent = state["responded"]
+    assert sent["answers"] == {"tone": "Яркий продающий", "cover": "Вращение на белом фоне",
+                               "photo": "фото нет, сгенерируй"}
+    assert "Тон карточек — Яркий продающий" in sent["response"]
+    assert h.db.balance(42) == 500 - 6
+
+
+def test_agent_questionnaire_defaults(h):
+    app, state = vilva_server([
+        {"status": "running", "pendingQuestions": QUESTIONS},
+        {"status": "completed", "creditsUsed": 1},
+    ])
+
+    async def go(base):
+        _agent_harness(h, base)
+        await h.afeed(h.msg("/agent карточки"), h.cb("am:autopilot"), h.cb("ab:0"))
+        for _ in range(300):
+            if any("Когда готово" in t for t in h.session.texts()):
+                break
+            await asyncio.sleep(0.01)
+        final = next(c for c in h.session.calls if isinstance(c, SendMessage) and c.text == "Когда готово:")
+        # обязательные не отвечены — «отправить» не пройдёт, «пусть решит сам» пройдёт
+        await h.afeed(h.cb(final.reply_markup.inline_keyboard[0][0].callback_data))
+        assert "responded" not in state
+        await h.afeed(h.cb(final.reply_markup.inline_keyboard[1][0].callback_data))
+        await h.drain()
+        await h.app.vilva.close()
+
+    asyncio.run(serve(app, go))
+    assert "по умолчанию" in state["responded"]["response"]

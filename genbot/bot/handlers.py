@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from dataclasses import dataclass, field
@@ -62,6 +63,8 @@ class App:
     # Ожидаемый ввод: user_id → ("agent_brief",) | ("agent_answer", gen_id) | ("seed", kind)
     pending: dict[int, tuple] = field(default_factory=dict)
     agent_drafts: dict[int, dict] = field(default_factory=dict)
+    # Анкеты агента: gen_id → {"run_id", "uid", "questions", "answers"}
+    agent_forms: dict[int, dict] = field(default_factory=dict)
     tasks: set[asyncio.Task] = field(default_factory=set)
     agent_poll: float = AGENT_POLL
 
@@ -502,6 +505,9 @@ async def on_text(message: Message, app: App, bot: Bot) -> None:
     if state and state[0] == "agent_answer":
         await agent_send_answer(message, app, state[1])
         return
+    if state and state[0] == "agent_form_text":
+        await agent_form_text(message, app, state[1], state[2])
+        return
     app.db.ensure_user(uid, message.from_user.username, app.cfg.free_credits)
     await generate(app, bot, message, settings_of(app, uid).get("kind", "image"), message.text)
 
@@ -726,13 +732,19 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
             log.warning("agent_get_run %s: %s", run_id, e)
             state = None
         if state is not None:
+            log_sig = (state.raw_status, len(state.questions))
+            if log_sig not in notified:
+                notified.add(log_sig)
+                log.info("agent %s: phase=%s status=%s payload=%s", run_id, state.phase, state.raw_status,
+                         json.dumps(state.raw, ensure_ascii=False, default=str)[:3000])
             if state.phase == "plan" and state.raw_status not in notified:
                 notified.add(state.raw_status)
                 await send_plan(app, bot, uid, run_id, gen_id)
-            elif state.phase == "question" and state.raw_status + state.text not in notified:
-                notified.add(state.raw_status + state.text)
-                app.pending[uid] = ("agent_answer", gen_id)
-                await bot.send_message(uid, f"🤖 Вопрос от агента:\n{state.text or 'нужно уточнение'}\n\nОтветь сообщением")
+            elif state.phase == "question":
+                sig = "q:" + "|".join(q.text for q in state.questions) if state.questions else "q:" + state.text
+                if sig not in notified:
+                    notified.add(sig)
+                    await send_questions(app, bot, uid, run_id, gen_id, state)
             elif state.phase in ("done", "failed", "cancelled"):
                 break
         if loop.time() > deadline:
@@ -755,6 +767,138 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
     else:
         app.db.finish(gen_id, False)
         await bot.send_message(uid, "Агент остановлен, кредиты вернул")
+
+
+def _question_keyboard(gen_id: int, qi: int, q, chosen: str | None) -> InlineKeyboardMarkup:
+    rows = []
+    for oi, opt in enumerate(q.options[:12]):
+        label = ("✅ " if opt == chosen else "") + (opt if len(opt) <= 60 else opt[:57] + "…")
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"aq:{gen_id}:{qi}:{oi}")])
+    custom = chosen is not None and chosen not in q.options
+    rows.append([InlineKeyboardButton(text=("✅ " if custom else "") + "✍️ Свой вариант", callback_data=f"aw:{gen_id}:{qi}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def send_questions(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, state) -> None:
+    questions = state.questions
+    if not questions or (len(questions) == 1 and not questions[0].options):
+        # Простой вопрос — ответ обычным сообщением.
+        app.pending[uid] = ("agent_answer", gen_id)
+        text = questions[0].text if questions else (state.text or "нужно уточнение")
+        await bot.send_message(uid, f"🤖 Вопрос от агента:\n{text}\n\nОтветь сообщением")
+        return
+    app.agent_forms[gen_id] = {"run_id": run_id, "uid": uid, "questions": questions, "answers": {}}
+    await bot.send_message(uid, f"🤖 Агенту нужны уточнения ({len(questions)}). Выбери варианты или напиши свои — "
+                                "отправлю, когда ответишь на всё")
+    for qi, q in enumerate(questions):
+        text = f"{qi + 1}. {q.text}{' *' if q.required else ''}"
+        if q.hint:
+            text += f"\n{q.hint}"
+        await bot.send_message(uid, text, reply_markup=_question_keyboard(gen_id, qi, q, None))
+    await bot.send_message(uid, "Когда готово:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ Отправить ответы", callback_data=f"as:{gen_id}")],
+        [InlineKeyboardButton(text="🤷 Пусть агент решит сам", callback_data=f"ad:{gen_id}")],
+    ]))
+
+
+def _form_for(app: App, callback_data: str, uid: int) -> tuple[int, dict] | None:
+    parts = callback_data.split(":")
+    if len(parts) < 2 or not parts[1].isdigit():
+        return None
+    form = app.agent_forms.get(int(parts[1]))
+    if form is None or form["uid"] != uid:
+        return None
+    return int(parts[1]), form
+
+
+async def submit_form(app: App, bot: Bot, gen_id: int, use_defaults: bool = False) -> bool:
+    form = app.agent_forms.get(gen_id)
+    if form is None:
+        return False
+    answers = {form["questions"][i].id: a for i, a in sorted(form["answers"].items())}
+    if use_defaults:
+        lines = ["Продолжай со своими вариантами по умолчанию."]
+        lines += [f"{form['questions'][i].text}: {a}" for i, a in sorted(form["answers"].items())]
+    else:
+        lines = [f"{i + 1}. {form['questions'][i].text} — {a}" for i, a in sorted(form["answers"].items())]
+    try:
+        await app.vilva.agent_answer(form["run_id"], "\n".join(lines), answers or None, use_defaults=use_defaults)
+    except ProviderError as e:
+        log.warning("agent_respond: %s", e)
+        await bot.send_message(form["uid"], "Не получилось передать ответы, попробуй ещё раз")
+        return False
+    app.agent_forms.pop(gen_id, None)
+    await bot.send_message(form["uid"], "Передал агенту, работает дальше")
+    return True
+
+
+async def _maybe_autosubmit(app: App, bot: Bot, gen_id: int) -> None:
+    form = app.agent_forms.get(gen_id)
+    if form and len(form["answers"]) == len(form["questions"]):
+        await submit_form(app, bot, gen_id)
+
+
+async def cb_agent_option(callback: CallbackQuery, bot: Bot, app: App) -> None:
+    found = _form_for(app, callback.data, callback.from_user.id)
+    if not found:
+        await callback.answer("Вопрос уже неактуален", show_alert=True)
+        return
+    gen_id, form = found
+    _, _, qi, oi = callback.data.split(":")
+    q = form["questions"][int(qi)]
+    form["answers"][int(qi)] = q.options[int(oi)]
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_question_keyboard(gen_id, int(qi), q, q.options[int(oi)]))
+    except Exception:
+        pass
+    await callback.answer("Принято")
+    await _maybe_autosubmit(app, bot, gen_id)
+
+
+async def cb_agent_custom(callback: CallbackQuery, app: App) -> None:
+    found = _form_for(app, callback.data, callback.from_user.id)
+    if not found:
+        await callback.answer("Вопрос уже неактуален", show_alert=True)
+        return
+    gen_id, form = found
+    qi = int(callback.data.split(":")[2])
+    app.pending[callback.from_user.id] = ("agent_form_text", gen_id, qi)
+    await callback.message.answer(f"Напиши свой вариант: {form['questions'][qi].text}")
+    await callback.answer()
+
+
+async def agent_form_text(message: Message, app: App, gen_id: int, qi: int) -> None:
+    form = app.agent_forms.get(gen_id)
+    if form is None:
+        await message.answer("Вопрос уже неактуален")
+        return
+    form["answers"][qi] = message.text.strip()
+    await message.answer("Принято ✅")
+    await _maybe_autosubmit(app, message.bot, gen_id)
+
+
+async def cb_agent_submit(callback: CallbackQuery, bot: Bot, app: App) -> None:
+    found = _form_for(app, callback.data, callback.from_user.id)
+    if not found:
+        await callback.answer("Уже отправлено", show_alert=True)
+        return
+    gen_id, form = found
+    missing = [i + 1 for i, q in enumerate(form["questions"]) if q.required and i not in form["answers"]]
+    if missing:
+        await callback.answer(f"Ответь на обязательные: {', '.join(map(str, missing))} — или «пусть решит сам»",
+                              show_alert=True)
+        return
+    await callback.answer()
+    await submit_form(app, bot, gen_id)
+
+
+async def cb_agent_defaults(callback: CallbackQuery, bot: Bot, app: App) -> None:
+    found = _form_for(app, callback.data, callback.from_user.id)
+    if not found:
+        await callback.answer("Уже отправлено", show_alert=True)
+        return
+    await callback.answer()
+    await submit_form(app, bot, found[0], use_defaults=True)
 
 
 async def send_plan(app: App, bot: Bot, uid: int, run_id: str, gen_id: int) -> None:
@@ -895,5 +1039,9 @@ def create_router() -> Router:
     r.callback_query.register(cb_agent_budget, F.data.startswith("ab:"))
     r.callback_query.register(cb_agent_plan, F.data.startswith("ap:"))
     r.callback_query.register(cb_agent_cancel, F.data.startswith("ac:"))
+    r.callback_query.register(cb_agent_option, F.data.startswith("aq:"))
+    r.callback_query.register(cb_agent_custom, F.data.startswith("aw:"))
+    r.callback_query.register(cb_agent_submit, F.data.startswith("as:"))
+    r.callback_query.register(cb_agent_defaults, F.data.startswith("ad:"))
     r.pre_checkout_query.register(pre_checkout)
     return r
