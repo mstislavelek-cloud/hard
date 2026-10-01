@@ -368,3 +368,69 @@ def test_agent_questionnaire_defaults(h):
 
     asyncio.run(serve(app, go))
     assert "по умолчанию" in state["responded"]["response"]
+
+
+def test_real_pause_format_ask_user(h):
+    """Формат из живого Vilva: status=paused, activePause.pauseTool=ask_user, вопросы в agent_get_plan."""
+    run_id = "fce852c8"
+    paused = {"runId": run_id, "status": "paused", "credits": {"used": 2, "ceiling": 25, "remaining": 23},
+              "todos": [], "activePause": {"pauseTool": "ask_user", "resumeKey": "pause_71116653"},
+              "next": "Run is waiting on you: answer via agent_respond with resumeKey 'pause_71116653'"}
+    done = {"runId": run_id, "status": "completed", "credits": {"used": 7, "ceiling": 25},
+            "activePause": None, "assets": [{"url": "https://cdn.vilva/card.png"}]}
+    st = {"respond": None, "phase": "paused"}
+
+    def result(rid, data):
+        return sse({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps(data)}]}})
+
+    async def handler(request):
+        msg = await request.json()
+        m = msg.get("method")
+        if m == "initialize":
+            return web.json_response({"jsonrpc": "2.0", "id": msg["id"], "result": {}}, headers={"Mcp-Session-Id": "s"})
+        if m == "notifications/initialized":
+            return web.Response(status=202)
+        if m == "tools/list":
+            return web.json_response({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [
+                {"name": "agent_create_run", "inputSchema": {"properties": {"brief": {}, "mode": {}, "creditBudget": {}}}},
+                {"name": "agent_get_run", "inputSchema": {"properties": {"runId": {}}}},
+                {"name": "agent_get_plan", "inputSchema": {"properties": {"runId": {}}}},
+                {"name": "agent_respond", "inputSchema": {"properties": {
+                    "runId": {}, "resumeKey": {}, "response": {}, "answers": {"type": "object"}}}},
+            ]}})
+        name, args = msg["params"]["name"], msg["params"]["arguments"]
+        if name == "agent_create_run":
+            return result(msg["id"], {"runId": run_id, "status": "running"})
+        if name == "agent_get_run":
+            return result(msg["id"], paused if st["phase"] == "paused" else done)
+        if name == "agent_get_plan":
+            return result(msg["id"], {"runId": run_id, "pause": {"tool": "ask_user", "input": {"questions": [
+                {"id": "tone", "question": "Тон карточек", "required": True,
+                 "options": ["Минимализм-премиум", "Яркий продающий"]}]}}})
+        if name == "agent_respond":
+            st["respond"] = args
+            st["phase"] = "done"
+            return result(msg["id"], {"ok": True})
+        return web.json_response({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": 1, "message": "no"}})
+
+    app = web.Application()
+    app.router.add_post("/mcp", handler)
+
+    async def go(base):
+        _agent_harness(h, base)
+        await h.afeed(h.msg("/agent карточки"), h.cb("am:autopilot"), h.cb("ab:0"))
+        for _ in range(300):
+            q = [c for c in h.session.calls if isinstance(c, SendMessage) and c.text.startswith("1. Тон")]
+            if q:
+                break
+            await asyncio.sleep(0.01)
+        await h.afeed(h.cb(q[0].reply_markup.inline_keyboard[1][0].callback_data))
+        await h.drain()
+        await h.app.vilva.close()
+
+    asyncio.run(serve(app, go))
+    assert st["respond"]["resumeKey"] == "pause_71116653"
+    assert st["respond"]["answers"] == {"tone": "Яркий продающий"}
+    assert st["respond"]["runId"] == run_id
+    assert h.db.balance(42) == 500 - 14   # credits.used=7 → ×2
+    assert any(isinstance(c, SendPhoto) for c in h.session.calls)

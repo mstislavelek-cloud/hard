@@ -27,6 +27,8 @@ from .config import Config, Pack
 from .db import Database, InsufficientCredits
 from .moderation import check_prompt
 from .providers import Media, ProviderError
+from .providers.util import find_key
+from .providers.vilva import extract_questions
 
 log = logging.getLogger(__name__)
 
@@ -737,13 +739,19 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
                 notified.add(log_sig)
                 log.info("agent %s: phase=%s status=%s payload=%s", run_id, state.phase, state.raw_status,
                          json.dumps(state.raw, ensure_ascii=False, default=str)[:3000])
-            if state.phase == "plan" and state.raw_status not in notified:
-                notified.add(state.raw_status)
+            if state.phase == "plan" and "p:" + (state.resume_key or state.raw_status) not in notified:
+                notified.add("p:" + (state.resume_key or state.raw_status))
                 await send_plan(app, bot, uid, run_id, gen_id)
             elif state.phase == "question":
-                sig = "q:" + "|".join(q.text for q in state.questions) if state.questions else "q:" + state.text
+                sig = "q:" + (state.resume_key or "|".join(q.text for q in state.questions) or state.text)
                 if sig not in notified:
                     notified.add(sig)
+                    if not state.questions:
+                        # Полный текст вопроса Vilva отдаёт в agent_get_plan.
+                        plan = await _fetch_plan(app, run_id)
+                        state.questions = extract_questions(plan)
+                        if not state.questions:
+                            state.text = _question_text(plan) or state.text
                     await send_questions(app, bot, uid, run_id, gen_id, state)
             elif state.phase in ("done", "failed", "cancelled"):
                 break
@@ -901,12 +909,27 @@ async def cb_agent_defaults(callback: CallbackQuery, bot: Bot, app: App) -> None
     await submit_form(app, bot, found[0], use_defaults=True)
 
 
-async def send_plan(app: App, bot: Bot, uid: int, run_id: str, gen_id: int) -> None:
+async def _fetch_plan(app: App, run_id: str):
     try:
         plan = await app.vilva.agent_plan(run_id)
     except ProviderError as e:
         log.warning("agent_get_plan %s: %s", run_id, e)
-        plan = None
+        return None
+    log.info("agent %s plan payload=%s", run_id, json.dumps(plan, ensure_ascii=False, default=str)[:4000])
+    return plan
+
+
+def _question_text(plan) -> str:
+    if plan is None:
+        return ""
+    if isinstance(plan, str):
+        return plan
+    q = find_key(plan, "question", "prompt", "message", "text")
+    return q if isinstance(q, str) and q.strip() else _format_plan(plan)
+
+
+async def send_plan(app: App, bot: Bot, uid: int, run_id: str, gen_id: int) -> None:
+    plan = await _fetch_plan(app, run_id)
     text = plan if isinstance(plan, str) else _format_plan(plan)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Одобрить", callback_data=f"ap:{gen_id}:1"),

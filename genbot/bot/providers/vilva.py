@@ -46,6 +46,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "agent": ("agentSlug", "agent_slug", "agentId", "agent_id"),
     "decision": ("action", "decision", "approval", "approve"),
     "answer": ("response", "answer", "message", "text", "reply"),
+    "resume_key": ("resumeKey", "resume_key", "pauseKey"),
     "answers": ("answers", "responses", "fields", "values", "formAnswers"),
     "defaults": ("useDefaults", "acceptDefaults", "useAgentChoices", "continueWithDefaults", "skip"),
 }
@@ -220,6 +221,9 @@ def _status(obj: Any) -> str:
 
 
 def _credits_used(obj: Any) -> float | None:
+    credits = obj.get("credits") if isinstance(obj, dict) else None
+    if isinstance(credits, dict) and isinstance(credits.get("used"), (int, float)):
+        return float(credits["used"])
     v = find_key(obj, "creditsUsed", "creditsSpent", "credits_used", "spentCredits", "creditsCharged", "cost")
     try:
         return float(v) if v is not None else None
@@ -233,6 +237,8 @@ class VilvaProvider:
         if not key and client is None:
             raise ValueError("VILVA_API_KEY не задан")
         self.client = client or McpClient(url, key)
+        # run_id → resumeKey активной паузы (нужен agent_respond, чтобы продолжить запуск)
+        self.resume_keys: dict[str, str] = {}
         self.poll_interval = poll_interval
         self.timeout = timeout
 
@@ -335,13 +341,22 @@ class VilvaProvider:
 
     async def agent_get(self, run_id: str) -> "AgentState":
         data = payload(await self.client.call_tool("agent_get_run", {"run_id": run_id}))
-        return AgentState.from_payload(run_id, data)
+        state = AgentState.from_payload(run_id, data)
+        if state.resume_key:
+            self.resume_keys[run_id] = state.resume_key
+        else:
+            self.resume_keys.pop(run_id, None)
+        return state
 
     async def agent_plan(self, run_id: str) -> Any:
         return payload(await self.client.call_tool("agent_get_plan", {"run_id": run_id}))
 
     async def agent_decide(self, run_id: str, approve: bool) -> None:
         decision = "approve" if approve else "reject"
+        if self.resume_keys.get(run_id):
+            await self.client.call_tool("agent_respond", {
+                "run_id": run_id, "resume_key": self.resume_keys[run_id], "decision": decision, "answer": decision})
+            return
         schema = self.client.schemas.get("agent_get_plan") or {}
         props = schema.get("properties") or {}
         if any(n in props for n in ALIASES["decision"]):
@@ -352,7 +367,7 @@ class VilvaProvider:
     async def agent_answer(self, run_id: str, text: str, answers: dict[str, str] | None = None,
                            use_defaults: bool = False) -> None:
         """Ответ агенту: текстом и, если схема agent_respond это позволяет, структурно по id вопросов."""
-        values: dict[str, Any] = {"run_id": run_id, "answer": text}
+        values: dict[str, Any] = {"run_id": run_id, "resume_key": self.resume_keys.get(run_id), "answer": text}
         props = (self.client.schemas.get("agent_respond") or {}).get("properties") or {}
         name = next((n for n in ALIASES["answers"] if n in props), None)
         if answers and name:
@@ -443,6 +458,8 @@ class AgentState:
     urls: list[str] = field(default_factory=list)
     questions: list[Question] = field(default_factory=list)
     raw: Any = None
+    pause_tool: str = ""
+    resume_key: str = ""
 
     @classmethod
     def from_payload(cls, run_id: str, data: Any) -> "AgentState":
@@ -458,13 +475,20 @@ class AgentState:
             phase = "plan"
         elif "question" in status or "input" in status or "waiting" in status or "awaiting" in status:
             phase = "question"
+        pause = data.get("activePause") if isinstance(data, dict) else None
+        pause_tool, resume_key = "", ""
+        if isinstance(pause, dict) and phase not in ("done", "failed", "cancelled"):
+            pause_tool = str(pause.get("pauseTool") or pause.get("tool") or "")
+            resume_key = str(pause.get("resumeKey") or "")
+            tool = pause_tool.lower()
+            phase = "question" if ("ask" in tool or "question" in tool or "input" in tool) else "plan"
         questions = extract_questions(data) if phase not in ("done", "failed", "cancelled") else []
         if questions and phase in ("running", "plan"):
             phase = "question"
         text = str(find_key(data, "question", "message", "summary", "output", "result") or "")
         urls = sorted(set(_all_urls(data)), key=lambda u: (not u.lower().split("?")[0].endswith(VIDEO_EXT + IMAGE_EXT), u))
         return cls(run_id, phase, status, text if isinstance(text, str) else "", _credits_used(data), urls,
-                   questions, data)
+                   questions, data, pause_tool, resume_key)
 
 
 def _all_urls(obj: Any) -> list[str]:
