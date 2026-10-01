@@ -460,3 +460,88 @@ def test_real_pause_format_ask_user(h):
     assert st["respond"]["runId"] == run_id
     assert h.db.balance(42) == 500 - 14   # credits.used=7 → ×2
     assert any(isinstance(c, SendPhoto) for c in h.session.calls)
+
+
+def test_budget_exceeded_raise_then_collect_assets(h):
+    """Живой формат: пауза run_chain/budget_exceeded → добавить кредиты → completed, ассеты дописываются позже."""
+    run_id = "r-budget"
+    st = {"respond": None, "stage": "pause", "asset_polls": 0}
+    budget_plan = {"runId": run_id, "pending": True, "pauseTool": "run_chain", "resumeKey": "pause_b",
+                   "question": {"kind": "budget_exceeded",
+                                "intro": "Firing these 1 generation(s) needs ~15 credits",
+                                "budget": {"used": 13, "ceiling": 25, "wouldBe": 28},
+                                "estimate": {"totalCredits": 15},
+                                "questions": [{"id": "budget_continue", "type": "confirm",
+                                               "label": "Raise the cap and fire?",
+                                               "noLabel": "Stop here", "yesLabel": "Raise and fire"}]}}
+
+    def result(rid, data):
+        return sse({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps(data)}]}})
+
+    async def handler(request):
+        msg = await request.json()
+        m = msg.get("method")
+        if m == "initialize":
+            return web.json_response({"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+        if m == "notifications/initialized":
+            return web.Response(status=202)
+        if m == "tools/list":
+            return web.json_response({"jsonrpc": "2.0", "id": msg["id"], "result": {"tools": [
+                {"name": "agent_create_run", "inputSchema": {"properties": {"brief": {}, "mode": {}, "creditBudget": {}}}},
+                {"name": "agent_get_run", "inputSchema": {"properties": {"runId": {}}}},
+                {"name": "agent_get_plan", "inputSchema": {"properties": {"runId": {}}}},
+                {"name": "agent_respond", "inputSchema": {"properties": {
+                    "runId": {}, "resumeKey": {}, "answer": {"type": "object"}}}},
+                {"name": "list_workspace_assets", "inputSchema": {"properties": {"workspaceId": {}}}},
+            ]}})
+        name, args = msg["params"]["name"], msg["params"]["arguments"]
+        if name == "agent_create_run":
+            return result(msg["id"], {"runId": run_id, "status": "running"})
+        if name == "agent_get_run":
+            if st["stage"] == "pause":
+                return result(msg["id"], {"runId": run_id, "status": "paused", "workspaceId": "ws1",
+                                          "credits": {"used": 13, "ceiling": 25},
+                                          "activePause": {"pauseTool": "run_chain", "resumeKey": "pause_b"}})
+            return result(msg["id"], {"runId": run_id, "status": "completed", "workspaceId": "ws1",
+                                      "credits": {"used": 28, "ceiling": 28}, "activePause": None})
+        if name == "agent_get_plan":
+            return result(msg["id"], budget_plan)
+        if name == "agent_respond":
+            st["respond"] = args
+            st["stage"] = "done"
+            return result(msg["id"], {"ok": True})
+        if name == "list_workspace_assets":
+            st["asset_polls"] += 1
+            assert args == {"workspaceId": "ws1"}
+            if st["asset_polls"] < 3:
+                return result(msg["id"], {"assets": [{"id": "a1", "status": "generating", "url": None}]})
+            return result(msg["id"], {"assets": [
+                {"id": "a1", "status": "completed", "url": "https://cdn.vilva/cards.png"},
+                {"id": "a2", "status": "completed", "url": "https://cdn.vilva/cover.mp4"}]})
+        return web.json_response({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": 1, "message": "no"}})
+
+    app = web.Application()
+    app.router.add_post("/mcp", handler)
+
+    async def go(base):
+        _agent_harness(h, base)
+        await h.afeed(h.msg("/agent карточки"), h.cb("am:autopilot"), h.cb("ab:0"))   # бюджет 50
+        for _ in range(300):
+            ask = [c for c in h.session.calls if isinstance(c, SendMessage) and "не хватает бюджета" in c.text]
+            if ask:
+                break
+            await asyncio.sleep(0.01)
+        assert "{" not in ask[0].text   # никакого JSON
+        raise_btn = ask[0].reply_markup.inline_keyboard[0][0]
+        assert "Добавить 6 кр" in raise_btn.text   # 3 кредита Vilva × наценка 2
+        await h.afeed(h.cb(raise_btn.callback_data))
+        await h.drain()
+        await h.app.vilva.close()
+
+    asyncio.run(serve(app, go))
+    assert st["respond"] == {"runId": run_id, "resumeKey": "pause_b", "answer": {"budget_continue": True}}
+    assert st["asset_polls"] >= 3
+    assert any(isinstance(c, SendPhoto) for c in h.session.calls)
+    assert any(isinstance(c, SendVideo) for c in h.session.calls)
+    # резерв 50 + 6 = 56, использовано 28 × 2 = 56
+    assert h.db.balance(42) == 500 - 56

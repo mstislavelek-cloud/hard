@@ -725,7 +725,7 @@ async def cb_agent_budget(callback: CallbackQuery, bot: Bot, app: App) -> None:
 async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, budget: int) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + AGENT_TIMEOUT
-    notified: set[str] = set()
+    notified: set = set()
     state = None
     while True:
         try:
@@ -734,29 +734,16 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
             log.warning("agent_get_run %s: %s", run_id, e)
             state = None
         if state is not None:
-            log_sig = (state.raw_status, len(state.questions))
+            log_sig = (state.raw_status, state.resume_key, len(state.questions))
             if log_sig not in notified:
                 notified.add(log_sig)
                 log.info("agent %s: phase=%s status=%s payload=%s", run_id, state.phase, state.raw_status,
                          json.dumps(state.raw, ensure_ascii=False, default=str)[:3000])
-            if state.phase == "plan" and "p:" + (state.resume_key or state.raw_status) not in notified:
-                notified.add("p:" + (state.resume_key or state.raw_status))
-                await send_plan(app, bot, uid, run_id, gen_id)
-            elif state.phase == "question":
-                sig = "q:" + (state.resume_key or "|".join(q.text for q in state.questions) or state.text)
+            if state.phase in ("plan", "question"):
+                sig = "pause:" + (state.resume_key or state.raw_status + "|".join(q.text for q in state.questions))
                 if sig not in notified:
                     notified.add(sig)
-                    if not state.questions:
-                        # Полный текст вопроса Vilva отдаёт в agent_get_plan.
-                        plan = await _fetch_plan(app, run_id)
-                        state.questions = extract_questions(plan)
-                        intro = find_key(plan, "intro")
-                        if not state.questions:
-                            state.text = _question_text(plan) or state.text
-                    else:
-                        intro = None
-                    await send_questions(app, bot, uid, run_id, gen_id, state,
-                                         intro if isinstance(intro, str) else "")
+                    await handle_pause(app, bot, uid, run_id, gen_id, state)
             elif state.phase in ("done", "failed", "cancelled"):
                 break
         if loop.time() > deadline:
@@ -767,18 +754,170 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
             break
         await asyncio.sleep(app.agent_poll)
 
+    app.agent_forms.pop(gen_id, None)
+    if state and state.phase == "done":
+        await bot.send_message(uid, "⏳ Агент закончил план, собираю результаты…")
+        urls = await collect_results(app, run_id, state)
+        # Генерации могли дописаться в рабочем пространстве уже после завершения запуска.
+        try:
+            state = await app.vilva.agent_get(run_id)
+        except ProviderError:
+            pass
+        await send_agent_result(bot, uid, state, urls)
+    cap = app.db.generation_cost(gen_id)
     used = state.credits_used if state else None
     charged = agent_credits(app, used) if used else None
     if state and state.phase == "done":
-        final = app.db.finish(gen_id, True, min(charged, budget) if charged else None)
-        await send_agent_result(bot, uid, state)
-        await bot.send_message(uid, f"✅ Агент закончил. Списано {final} из {budget} кр, баланс {app.db.balance(uid)} кр")
+        final = app.db.finish(gen_id, True, min(charged, cap) if charged else None)
+        await bot.send_message(uid, f"✅ Готово. Списано {final} из {cap} кр, баланс {app.db.balance(uid)} кр")
     elif charged:
-        final = app.db.finish(gen_id, True, min(charged, budget))
+        final = app.db.finish(gen_id, True, min(charged, cap))
         await bot.send_message(uid, f"Агент остановлен. Списано за сделанное {final} кр, остальное вернул")
     else:
         app.db.finish(gen_id, False)
         await bot.send_message(uid, "Агент остановлен, кредиты вернул")
+
+
+RESULTS_WAIT = 15 * 60
+PENDING_ASSET = ("pending", "queued", "running", "processing", "generating", "in_progress", "in-progress",
+                 "starting", "submitted")
+
+
+async def collect_results(app: App, run_id: str, state) -> list[str]:
+    """Ждёт, пока догенерируются ассеты в рабочем пространстве запуска, и возвращает их ссылки."""
+    workspace = find_key(state.raw, "workspaceId", "workspace_id") if state else None
+    if not workspace:
+        return list(state.urls) if state else []
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + RESULTS_WAIT
+    urls: list[str] = list(state.urls)
+    logged = False
+    stable = 0
+    while True:
+        try:
+            data = await app.vilva.workspace_assets(str(workspace))
+        except ProviderError as e:
+            log.warning("list_workspace_assets %s: %s", workspace, e)
+            return urls
+        if not logged:
+            logged = True
+            log.info("agent %s assets payload=%s", run_id, json.dumps(data, ensure_ascii=False, default=str)[:3000])
+        found, pending = _assets_status(data)
+        for u in found:
+            if u not in urls:
+                urls.append(u)
+        if not pending:
+            stable += 1
+            if urls or stable >= 3:
+                return urls
+        else:
+            stable = 0
+        if loop.time() > deadline:
+            return urls
+        await asyncio.sleep(max(app.agent_poll, 0.01) * 2)
+
+
+def _assets_status(data) -> tuple[list[str], bool]:
+    from .providers.vilva import IMAGE_EXT, VIDEO_EXT, _all_urls
+
+    items: list = []
+    if isinstance(data, dict):
+        for k in ("assets", "items", "data", "results"):
+            if isinstance(data.get(k), list):
+                items = data[k]
+                break
+    elif isinstance(data, list):
+        items = data
+    pending = False
+    for it in items:
+        st = str(find_key(it, "status", "state") or "").lower() if isinstance(it, dict) else ""
+        if st in PENDING_ASSET:
+            pending = True
+    media = [u for u in _all_urls(data) if u.lower().split("?", 1)[0].endswith(IMAGE_EXT + VIDEO_EXT)]
+    return media, pending
+
+
+async def handle_pause(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, state) -> None:
+    """Любая пауза Vilva: полный вопрос лежит в agent_get_plan."""
+    plan = await _fetch_plan(app, run_id)
+    question = plan.get("question") if isinstance(plan, dict) else None
+    kind = str(question.get("kind") or question.get("type") or "") if isinstance(question, dict) else ""
+    if "budget" in kind:
+        await send_budget_request(app, bot, uid, gen_id, question)
+        return
+    questions = extract_questions(plan) or state.questions
+    if questions:
+        state.questions = questions
+        intro = find_key(plan, "intro")
+        await send_questions(app, bot, uid, run_id, gen_id, state, intro if isinstance(intro, str) else "")
+        return
+    if state.phase == "question":
+        state.text = _question_text(plan) or state.text
+        await send_questions(app, bot, uid, run_id, gen_id, state)
+        return
+    await send_plan(app, bot, uid, run_id, gen_id, plan)
+
+
+async def send_budget_request(app: App, bot: Bot, uid: int, gen_id: int, question: dict) -> None:
+    budget = question.get("budget") or {}
+    estimate = question.get("estimate") or {}
+    used, ceiling = float(budget.get("used") or 0), float(budget.get("ceiling") or 0)
+    would_be = float(budget.get("wouldBe") or 0)
+    need = float(estimate.get("totalCredits") or 0)
+    extra_units = max(would_be - ceiling, need - (ceiling - used), 1.0)
+    extra = agent_credits(app, extra_units)
+    qid = next((q.get("id") for q in question.get("questions") or [] if isinstance(q, dict)), "budget_continue")
+    app.agent_forms[gen_id] = {"budget": True, "uid": uid, "qid": qid, "extra": extra, "run_id": None}
+    run = app.db.agent_run_by_gen(gen_id)
+    if run:
+        app.agent_forms[gen_id]["run_id"] = run[0]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Добавить {extra} кр и продолжить", callback_data=f"ax:{gen_id}:1")],
+        [InlineKeyboardButton(text="⛔ Остановиться здесь", callback_data=f"ax:{gen_id}:0")],
+    ])
+    await bot.send_message(
+        uid,
+        "💸 Агенту не хватает бюджета на следующий шаг.\n"
+        f"Шагу нужно ещё ~{agent_credits(app, need) if need else extra} кр, а в лимите осталось "
+        f"{agent_credits(app, max(ceiling - used, 0)) if ceiling > used else 0} кр.\n\n"
+        f"Добавить {extra} кр к лимиту (спишется с баланса, неиспользованное вернётся) или остановиться? "
+        "Если остановиться — уже сделанное останется, я пришлю результаты.\n"
+        f"Баланс: {app.db.balance(uid)} кр",
+        reply_markup=kb)
+
+
+async def cb_agent_budget_raise(callback: CallbackQuery, bot: Bot, app: App) -> None:
+    _, gen, yes = callback.data.split(":")
+    form = app.agent_forms.get(int(gen)) if gen.isdigit() else None
+    if not form or not form.get("budget") or form["uid"] != callback.from_user.id or not form.get("run_id"):
+        await callback.answer("Вопрос уже неактуален", show_alert=True)
+        return
+    approve = yes == "1"
+    if approve:
+        try:
+            app.db.extend(int(gen), form["extra"])
+        except InsufficientCredits:
+            await callback.answer(f"Не хватает кредитов: нужно {form['extra']}, у тебя "
+                                  f"{app.db.balance(callback.from_user.id)}", show_alert=True)
+            await callback.message.answer("Пополни баланс и нажми ещё раз:", reply_markup=packs_keyboard(app.cfg))
+            return
+    try:
+        await app.vilva.agent_answer(form["run_id"], "Raise and fire" if approve else "Stop here",
+                                     {form["qid"]: approve})
+    except ProviderError as e:
+        log.warning("agent budget respond: %s", e)
+        if approve:
+            app.db.extend(int(gen), -form["extra"])
+        await callback.answer("Не получилось, попробуй ещё раз", show_alert=True)
+        return
+    app.agent_forms.pop(int(gen), None)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer()
+    await callback.message.answer(
+        f"Лимит поднят на {form['extra']} кр, агент продолжает" if approve else "Ок, останавливаю агента и собираю результаты")
 
 
 def _short(text: str, n: int = 60) -> str:
@@ -886,7 +1025,8 @@ async def submit_form(app: App, bot: Bot, gen_id: int, use_defaults: bool = Fals
     if use_defaults:
         _fill_defaults(form)
     qs = form["questions"]
-    answers = {qs[i].id: a for i, a in sorted(form["answers"].items()) if a not in (None, "", [])}
+    answers = {qs[i].id: (a == "true" if qs[i].qtype == "confirm" and a in ("true", "false") else a)
+               for i, a in sorted(form["answers"].items()) if a not in (None, "", [])}
     lines = []
     for i, a in sorted(form["answers"].items()):
         q = qs[i]
@@ -1041,8 +1181,9 @@ def _question_text(plan) -> str:
     return q if isinstance(q, str) and q.strip() else _format_plan(plan)
 
 
-async def send_plan(app: App, bot: Bot, uid: int, run_id: str, gen_id: int) -> None:
-    plan = await _fetch_plan(app, run_id)
+async def send_plan(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, plan=None) -> None:
+    if plan is None:
+        plan = await _fetch_plan(app, run_id)
     text = plan if isinstance(plan, str) else _format_plan(plan)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Одобрить", callback_data=f"ap:{gen_id}:1"),
@@ -1068,7 +1209,16 @@ def _format_plan(plan) -> str:
             lines.append(f"\nСмета Vilva: {est}")
         if lines:
             return "\n".join(lines)
-    return json.dumps(plan, ensure_ascii=False, indent=1)
+        q = plan.get("question")
+        intro = (q.get("intro") or q.get("summary") or q.get("title")) if isinstance(q, dict) else None
+        if isinstance(intro, str) and intro.strip():
+            return intro
+        summary = find_key(plan, "summary", "intro", "description")
+        if isinstance(summary, str) and summary.strip():
+            return summary
+    if isinstance(plan, str):
+        return plan
+    return "Агент ждёт подтверждения, чтобы продолжить"
 
 
 async def cb_agent_plan(callback: CallbackQuery, app: App) -> None:
@@ -1114,9 +1264,10 @@ async def agent_send_answer(message: Message, app: App, gen_id: int) -> None:
         await message.answer("Не получилось передать ответ, попробуй ещё раз")
 
 
-async def send_agent_result(bot: Bot, uid: int, state) -> None:
+async def send_agent_result(bot: Bot, uid: int, state, urls: list[str] | None = None) -> None:
     sent = 0
-    for url in state.urls[:10]:
+    all_urls = list(dict.fromkeys((urls or []) + (list(state.urls) if state else [])))
+    for url in all_urls[:20]:
         path = url.lower().split("?", 1)[0]
         try:
             if path.endswith((".mp4", ".mov", ".webm")):
@@ -1129,10 +1280,11 @@ async def send_agent_result(bot: Bot, uid: int, state) -> None:
         except Exception:
             log.exception("Не удалось отправить результат агента %s", url)
             await bot.send_message(uid, url)
-    if state.text:
-        await bot.send_message(uid, state.text[:3500])
-    if not sent and not state.text:
-        await bot.send_message(uid, "Результат лежит в рабочем пространстве Vilva")
+    text = state.text if state else ""
+    if text:
+        await bot.send_message(uid, text[:3500])
+    if not sent:
+        await bot.send_message(uid, "Готовых картинок или видео не нашёл — проверь рабочее пространство в Vilva")
 
 
 # ---------- роутер ----------
@@ -1178,6 +1330,7 @@ def create_router() -> Router:
     r.callback_query.register(cb_agent_option, F.data.startswith("aq:"))
     r.callback_query.register(cb_agent_custom, F.data.startswith("aw:"))
     r.callback_query.register(cb_agent_done, F.data.startswith("af:"))
+    r.callback_query.register(cb_agent_budget_raise, F.data.startswith("ax:"))
     r.callback_query.register(cb_agent_submit, F.data.startswith("as:"))
     r.callback_query.register(cb_agent_defaults, F.data.startswith("ad:"))
     r.pre_checkout_query.register(pre_checkout)

@@ -169,6 +169,25 @@ class Database:
             "SELECT run_id, user_id FROM agent_runs WHERE gen_id = ?", (gen_id,)
         ).fetchone()
 
+    def extend(self, gen_id: int, extra: int) -> None:
+        """Довнести (или вернуть при extra < 0) кредиты в резерв незавершённой генерации."""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT user_id, status FROM generations WHERE id = ?", (gen_id,)).fetchone()
+                if row is None or row[1] != "pending":
+                    raise ValueError("generation is not pending")
+                cur = self._conn.execute(
+                    "UPDATE users SET credits = credits - ? WHERE id = ? AND credits >= ?", (extra, row[0], extra))
+                if cur.rowcount != 1:
+                    raise InsufficientCredits
+                self._conn.execute("UPDATE generations SET cost = cost + ? WHERE id = ?", (extra, gen_id))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
     def generation_cost(self, gen_id: int) -> int:
         row = self._conn.execute("SELECT cost FROM generations WHERE id = ?", (gen_id,)).fetchone()
         return row[0] if row else 0

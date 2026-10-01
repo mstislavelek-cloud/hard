@@ -47,6 +47,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "decision": ("action", "decision", "approval", "approve"),
     "answer": ("response", "answer", "message", "text", "reply"),
     "resume_key": ("resumeKey", "resume_key", "pauseKey"),
+    "workspace": ("workspaceId", "workspace_id", "workspace"),
     "answers": ("answers", "responses", "fields", "values", "formAnswers"),
     "defaults": ("useDefaults", "acceptDefaults", "useAgentChoices", "continueWithDefaults", "skip"),
 }
@@ -382,6 +383,9 @@ class VilvaProvider:
         """Ответ агенту. Анкета Vilva ждёт объект {id вопроса: значение}; простой вопрос — {"text": ...}."""
         await self._respond(run_id, text, answers if answers else {"text": text})
 
+    async def workspace_assets(self, workspace_id: str) -> Any:
+        return payload(await self.client.call_tool("list_workspace_assets", {"workspace": workspace_id}))
+
     async def agent_cancel(self, run_id: str) -> None:
         await self.client.call_tool("agent_cancel_run", {"run_id": run_id})
 
@@ -426,6 +430,9 @@ def _as_question(d: dict, idx: int) -> Question | None:
     qid = str(d.get("id") or d.get("key") or d.get("questionId") or d.get("name") or idx)
     hint = d.get("help") or d.get("description") or d.get("hint") or d.get("helpText") or d.get("placeholder") or ""
     qtype = str(d.get("type") or ("single-choice" if options else "text")).lower()
+    if qtype == "confirm" and not options:
+        options = [str(d.get("yesLabel") or "Да"), str(d.get("noLabel") or "Нет")]
+        values = ["true", "false"]
     multiple = "multi" in qtype or d.get("multiple") is True and "file" not in qtype
     return Question(qid, text.strip(), options, bool(d.get("required")), hint if isinstance(hint, str) else "",
                     values, qtype, bool(multiple))
