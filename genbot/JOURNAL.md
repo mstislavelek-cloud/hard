@@ -15,3 +15,16 @@
 2. выбор провайдера и пополнение: fal (карта) или openrouter (крипта), для старта хватит $10–15
 3. vps за ~$5/мес или запуск на своём windows для теста
 4. свой telegram id в `ADMIN_IDS` (узнать можно через @userinfobot)
+
+## 2026-10-01 (2)
+**сделано**
+- провайдер mage: rest, поля config взяты из описания моделей mage (gpt image 2.5 flare для картинок, cherry mini для видео, оживление фото через поле `image`)
+- провайдер vilva: собственный mcp-клиент (streamable http, ответы json и sse), `generate_image`, `generate_video` с опросом `check_generation`
+- `python -m bot.check` для проверки vilva
+- 32 теста зелёные, mage и vilva гоняются против фейковых серверов
+
+**не проверено / риски**
+- пути rest у mage (`/v1/generate`, `/v1/requests/{id}`) угаданы: доки закрыты для контейнера, пути вынесены в `.env`
+- точные имена аргументов vilva (`prompt`, `model`) и оживление фото через vilva: смотреть вывод `python -m bot.check`
+- creative fabrica: публичного api не найдено, не подключал
+- оба ключа были в чате открытым текстом, их нужно перевыпустить
