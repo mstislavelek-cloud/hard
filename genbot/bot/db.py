@@ -1,6 +1,7 @@
 """Хранилище на SQLite: пользователи, кредиты, платежи, генерации."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -18,6 +19,12 @@ CREATE TABLE IF NOT EXISTS payments (
     stars INTEGER NOT NULL,
     credits INTEGER NOT NULL,
     refunded INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    gen_id INTEGER NOT NULL,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS generations (
@@ -41,6 +48,9 @@ class Database:
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(users)")}
+        if "settings" not in cols:
+            self._conn.execute("ALTER TABLE users ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'")
         self._lock = threading.Lock()
 
     def close(self) -> None:
@@ -81,8 +91,12 @@ class Database:
                 self._conn.execute("ROLLBACK")
                 raise
 
-    def finish(self, gen_id: int, ok: bool) -> None:
-        """Закрывает генерацию; при ошибке возвращает кредиты пользователю."""
+    def finish(self, gen_id: int, ok: bool, actual_cost: int | None = None) -> int:
+        """Закрывает генерацию и возвращает итоговую цену.
+
+        При ошибке кредиты возвращаются полностью. Если фактическая цена отличается от
+        зарезервированной, разница возвращается или доплачивается (не больше остатка на балансе).
+        """
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
@@ -90,16 +104,69 @@ class Database:
             ).fetchone()
             if row is None or row[2] != "pending":
                 self._conn.execute("ROLLBACK")
-                return
+                return row[1] if row else 0
             user_id, cost, _ = row
+            final = 0 if not ok else (cost if actual_cost is None else max(actual_cost, 0))
+            delta = cost - final  # > 0 — вернуть, < 0 — доплатить
+            if delta < 0:
+                balance = self._conn.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()[0]
+                delta = -min(-delta, max(balance, 0))
+                final = cost - delta
             self._conn.execute(
-                "UPDATE generations SET status = ? WHERE id = ?", ("done" if ok else "failed", gen_id)
+                "UPDATE generations SET status = ?, cost = ? WHERE id = ?",
+                ("done" if ok else "failed", final, gen_id),
             )
-            if not ok:
-                self._conn.execute(
-                    "UPDATE users SET credits = credits + ? WHERE id = ?", (cost, user_id)
-                )
+            if delta:
+                self._conn.execute("UPDATE users SET credits = credits + ? WHERE id = ?", (delta, user_id))
             self._conn.execute("COMMIT")
+            return final
+
+    # --- настройки пользователя ---
+
+    def get_settings(self, user_id: int) -> dict:
+        row = self._conn.execute("SELECT settings FROM users WHERE id = ?", (user_id,)).fetchone()
+        try:
+            return json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            return {}
+
+    def save_settings(self, user_id: int, settings: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE users SET settings = ? WHERE id = ?", (json.dumps(settings, ensure_ascii=False), user_id)
+            )
+
+    # --- запуски агента ---
+
+    def add_agent_run(self, run_id: str, user_id: int, gen_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO agent_runs (run_id, user_id, gen_id, created_at) VALUES (?, ?, ?, ?)",
+                (run_id, user_id, gen_id, int(time.time())),
+            )
+
+    def agent_run(self, run_id: str) -> tuple[int, int] | None:
+        """(user_id, gen_id) или None."""
+        return self._conn.execute(
+            "SELECT user_id, gen_id FROM agent_runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+
+    def agent_run_by_gen(self, gen_id: int) -> tuple[str, int] | None:
+        """(run_id, user_id) или None."""
+        return self._conn.execute(
+            "SELECT run_id, user_id FROM agent_runs WHERE gen_id = ?", (gen_id,)
+        ).fetchone()
+
+    def generation_cost(self, gen_id: int) -> int:
+        row = self._conn.execute("SELECT cost FROM generations WHERE id = ?", (gen_id,)).fetchone()
+        return row[0] if row else 0
+
+    def pending_agent_runs(self) -> list[tuple[str, int, int]]:
+        """Незавершённые запуски агента (после перезапуска бота их нужно доотследить)."""
+        return self._conn.execute(
+            "SELECT a.run_id, a.user_id, a.gen_id FROM agent_runs a JOIN generations g ON g.id = a.gen_id"
+            " WHERE g.status = 'pending'"
+        ).fetchall()
 
     def add_payment(self, charge_id: str, user_id: int, stars: int, credits: int) -> bool:
         """Зачисляет оплату. Повторный charge_id игнорируется. True, если зачислено."""
@@ -150,5 +217,6 @@ class Database:
             "stars": q("SELECT COALESCE(SUM(stars), 0) FROM payments WHERE refunded = 0").fetchone()[0],
             "images": q("SELECT COUNT(*) FROM generations WHERE kind = 'image' AND status = 'done'").fetchone()[0],
             "videos": q("SELECT COUNT(*) FROM generations WHERE kind = 'video' AND status = 'done'").fetchone()[0],
+            "agent": q("SELECT COUNT(*) FROM generations WHERE kind = 'agent' AND status = 'done'").fetchone()[0],
             "failed": q("SELECT COUNT(*) FROM generations WHERE status = 'failed'").fetchone()[0],
         }

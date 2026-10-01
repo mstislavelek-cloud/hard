@@ -3,28 +3,23 @@ from __future__ import annotations
 
 import base64
 
-from .base import Media, ProviderError
+from .base import GenResult, Media, ProviderError
 
 # Однопиксельный PNG.
-_PNG = base64.b64decode(
+PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 )
 
 
 class MockProvider:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, units: float | None = None) -> None:
         self.fail = fail
-        self.calls: list[tuple[str, str]] = []
+        self.units = units
+        self.calls: list[tuple[str, str, dict, bool]] = []
 
-    async def generate_image(self, prompt: str) -> Media:
-        self.calls.append(("image", prompt))
+    async def generate(self, spec, prompt, params, image):
+        self.calls.append((spec.key, prompt, dict(params), image is not None))
         if self.fail:
-            raise ProviderError("mock failure")
-        return Media(data=_PNG, filename="mock.png")
-
-    async def generate_video(self, prompt: str, image: bytes | None = None) -> Media:
-        self.calls.append(("video", prompt))
-        if self.fail:
-            raise ProviderError("mock failure")
-        # Видео-заглушку отдаём картинкой: обработчик отправит её как документ.
-        return Media(data=_PNG, filename="mock-video.png")
+            raise ProviderError("mock failure", code="generation_failed")
+        name = "mock.png" if spec.kind == "image" else "mock-video.png"
+        return GenResult(Media(data=PNG, filename=name), self.units if self.units is not None else spec.base_units)

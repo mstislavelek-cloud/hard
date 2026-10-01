@@ -2,11 +2,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from ..catalog import ModelSpec
 
 
 class ProviderError(Exception):
-    """Генерация не удалась; кредиты нужно вернуть."""
+    """Генерация не удалась; кредиты нужно вернуть.
+
+    code — машинный код причины (например, content_blocked), user_message — что сказать пользователю.
+    """
+
+    def __init__(self, message: str, code: str = "error", user_message: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.user_message = user_message
 
 
 @dataclass
@@ -18,9 +29,14 @@ class Media:
     filename: str = "result"
 
 
-class ImageProvider(Protocol):
-    async def generate_image(self, prompt: str) -> Media: ...
+@dataclass
+class GenResult:
+    media: Media
+    # Фактическая стоимость у провайдера (gems / кредиты Vilva), если известна.
+    units: float | None = None
 
 
-class VideoProvider(Protocol):
-    async def generate_video(self, prompt: str, image: bytes | None = None) -> Media: ...
+class Provider(Protocol):
+    async def generate(
+        self, spec: "ModelSpec", prompt: str, params: dict[str, str], image: bytes | None
+    ) -> GenResult: ...
