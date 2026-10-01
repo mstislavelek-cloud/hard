@@ -1,0 +1,13 @@
+[Unit]
+Description=genbot telegram bot
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/genbot
+EnvironmentFile=/opt/genbot/.env
+ExecStart=/opt/genbot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
