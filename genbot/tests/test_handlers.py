@@ -114,3 +114,12 @@ def test_admin_stats_only_for_admin(h):
     assert not any("Пользователи" in t for t in h.session.texts())
     h.feed(h.msg("/stats", uid=1))
     assert any("Пользователи" in t for t in h.session.texts())
+
+
+def test_admin_give_credits(h):
+    h.feed(h.msg("/give 100", uid=1), h.msg("/give 50 42", uid=1), h.msg("/give -500 42", uid=1))
+    assert h.db.balance(1) == 100
+    assert h.db.balance(42) == 0
+    assert any("Начислил 50" in t for t in h.session.texts())
+    h.feed(h.msg("/give 1000", uid=42))  # не админ
+    assert h.db.balance(42) == 0

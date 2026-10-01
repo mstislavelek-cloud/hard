@@ -65,6 +65,18 @@ class Database:
             )
             return cur.rowcount == 1
 
+    def grant(self, user_id: int, amount: int) -> int:
+        """Ручное начисление (или списание при amount < 0, не ниже нуля). Возвращает новый баланс."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO users (id, username, credits, created_at) VALUES (?, NULL, 0, ?)",
+                (user_id, int(time.time())),
+            )
+            self._conn.execute(
+                "UPDATE users SET credits = MAX(credits + ?, 0) WHERE id = ?", (amount, user_id)
+            )
+        return self.balance(user_id)
+
     def balance(self, user_id: int) -> int:
         row = self._conn.execute("SELECT credits FROM users WHERE id = ?", (user_id,)).fetchone()
         return row[0] if row else 0

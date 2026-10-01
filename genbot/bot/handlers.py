@@ -433,6 +433,26 @@ async def cmd_stats(message: Message, app: App) -> None:
     )
 
 
+async def cmd_give(message: Message, command: CommandObject, bot: Bot, app: App) -> None:
+    """/give <кредиты> [user_id] — начислить (минус — списать). Без user_id — себе."""
+    if message.from_user.id not in app.cfg.admin_ids:
+        return
+    parts = (command.args or "").split()
+    if not parts or not parts[0].lstrip("-").isdigit() or (len(parts) > 1 and not parts[1].isdigit()):
+        await message.answer("Формат: /give 100 — себе, /give 100 123456789 — пользователю, /give -50 … — списать")
+        return
+    amount = int(parts[0])
+    target = int(parts[1]) if len(parts) > 1 else message.from_user.id
+    balance = app.db.grant(target, amount)
+    log.info("Админ %s: %+d кр пользователю %s", message.from_user.id, amount, target)
+    await message.answer(f"{'Начислил' if amount >= 0 else 'Списал'} {abs(amount)} кр пользователю {target}. Баланс: {balance} кр")
+    if target != message.from_user.id and amount > 0:
+        try:
+            await bot.send_message(target, f"🎁 Тебе начислено {amount} кр. Баланс: {balance} кр")
+        except Exception:
+            pass
+
+
 async def cmd_refund(message: Message, command: CommandObject, bot: Bot, app: App) -> None:
     if message.from_user.id not in app.cfg.admin_ids:
         return
@@ -854,6 +874,7 @@ def create_router() -> Router:
     r.message.register(btn_agent, F.text == BTN_AGENT)
     r.message.register(cmd_stats, Command("stats"))
     r.message.register(cmd_refund, Command("refund"))
+    r.message.register(cmd_give, Command("give"))
     r.message.register(on_payment, F.successful_payment)
     r.message.register(on_photo, F.photo)
     r.message.register(cmd_video, Command("video"))

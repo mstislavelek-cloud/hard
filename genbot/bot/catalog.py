@@ -25,6 +25,10 @@ class ModelSpec:
     simple: dict[str, str] = field(default_factory=dict)    # параметры простого режима
     image_field: str | None = None  # куда класть фото пользователя
     note: str = ""
+    # Точные цены по значению параметра, например {"resolution": {"1K": 12, "2K": 18}}.
+    price_table: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Цена за секунду видео (если провайдер считает так).
+    per_second: float = 0.0
 
 
 def _mage_image(model_id: str, arch: str, title: str, gems: float, res: tuple[str, ...], note: str) -> ModelSpec:
@@ -103,6 +107,17 @@ class Catalog:
     def estimate_units(self, spec: ModelSpec, params: dict[str, str]) -> float:
         """Оценка стоимости у провайдера с учётом длительности и разрешения."""
         units = spec.base_units
+        for name, table in spec.price_table.items():
+            if params.get(name) in table:
+                units = table[params[name]]
+        if spec.per_second and params.get("duration"):
+            try:
+                scale = units / spec.base_units if spec.base_units else 1.0
+                return spec.per_second * float(params["duration"]) * scale
+            except ValueError:
+                return units
+        if spec.price_table:
+            return units
         if "duration" in params and "duration" in spec.base:
             try:
                 units *= float(params["duration"]) / float(spec.base["duration"])

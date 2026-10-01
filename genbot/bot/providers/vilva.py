@@ -12,6 +12,7 @@ import base64
 import itertools
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -247,7 +248,7 @@ class VilvaProvider:
         items = _model_items(data)
         specs = []
         for item in items:
-            mid = str(item.get("id") or item.get("slug") or item.get("model") or item.get("name") or "")
+            mid = str(item.get("key") or item.get("id") or item.get("slug") or item.get("model") or "")
             if not mid:
                 continue
             kind = _model_kind(item)
@@ -259,14 +260,25 @@ class VilvaProvider:
                 vals = item.get(key + "s") or item.get(_camel(key) + "s")
                 if isinstance(vals, list) and vals:
                     options[key] = tuple(str(v) for v in vals)
-            cost = _credits_used({"cost": find_key(item, "credits", "cost", "price", "creditCost", "costCredits")})
+            base, table, per_second = _parse_credits(item)
+            simple = {}
+            if "aspect_ratio" in options:
+                simple["aspect_ratio"] = next(
+                    (a for a in (("1:1",) if kind == "image" else ("9:16", "16:9")) if a in options["aspect_ratio"]),
+                    options["aspect_ratio"][0])
+            if "resolution" in options:
+                simple["resolution"] = options["resolution"][0]
+            if "duration" in options:
+                simple["duration"] = "5" if "5" in options["duration"] else options["duration"][0]
+            refs = item.get("maxReferenceImages")
+            accepts = _accepts_image(schemas.get(tool)) or (isinstance(refs, int) and refs > 0)
             specs.append(ModelSpec(
                 key=f"vilva:{mid}", provider="vilva", kind=kind,
-                title=str(item.get("name") or item.get("title") or mid), arch=mid,
-                base_units=cost or 1.0, options=options,
-                simple={k: v[0] for k, v in options.items() if k == "aspect_ratio"},
-                image_field="image" if kind == "video" or _accepts_image(schemas.get(tool)) else None,
+                title=str(item.get("displayName") or item.get("name") or item.get("title") or mid), arch=mid,
+                base_units=base or 1.0, options=options, simple=simple,
+                image_field="image" if accepts or kind == "video" else None,
                 note=str(item.get("description") or "")[:80],
+                price_table=table, per_second=per_second,
             ))
         return specs
 
@@ -399,6 +411,35 @@ def _model_items(data: Any) -> list[dict]:
     if isinstance(data, list):
         return [x for x in data if isinstance(x, dict)]
     return []
+
+
+def _snake(s: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
+
+
+def _parse_credits(item: dict) -> tuple[float, dict[str, dict[str, float]], float]:
+    """credits: число или {"base": 12, "perResolution": {"1K": 12}, "perSecond": 3}."""
+    raw = None
+    for k in ("credits", "cost", "price", "creditCost", "costCredits"):
+        if item.get(k) is not None:
+            raw = item[k]
+            break
+    if isinstance(raw, (int, float)):
+        return float(raw), {}, 0.0
+    if not isinstance(raw, dict):
+        return 0.0, {}, 0.0
+    table: dict[str, dict[str, float]] = {}
+    per_second = 0.0
+    for k, v in raw.items():
+        if k in ("perSecond", "per_second") and isinstance(v, (int, float)):
+            per_second = float(v)
+        elif k.startswith("per") and isinstance(v, dict):
+            name = _snake(k[3:].lstrip("_"))
+            table[name] = {str(a): float(b) for a, b in v.items() if isinstance(b, (int, float))}
+    base = raw.get("base")
+    if not isinstance(base, (int, float)):
+        base = min((min(t.values()) for t in table.values() if t), default=0.0)
+    return float(base), table, per_second
 
 
 def _model_kind(item: dict) -> str:

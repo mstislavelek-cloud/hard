@@ -243,3 +243,41 @@ def test_agent_cancel_refunds(h):
     assert "agent_cancel_run" in [c[0] for c in state["calls"]]
     assert h.db.balance(42) == 500
     assert any("кредиты вернул" in t for t in h.session.texts())
+
+
+def test_parse_real_list_models_format():
+    """Формат из реального ответа Vilva list_models (key, displayName, kind, credits.perResolution)."""
+    from bot.catalog import Catalog
+    from bot.config import Config
+
+    data = {"models": [
+        {"key": "nano-banana-2", "displayName": "Nano Banana 2", "kind": "image",
+         "aspectRatios": ["1:1", "16:9", "auto"], "resolutions": ["1K", "2K", "4K"], "maxReferenceImages": 14,
+         "credits": {"base": 12, "perResolution": {"1K": 12, "2K": 18, "4K": 27}}},
+        {"key": "nano-banana-2-lite", "displayName": "Nano Banana 2 Lite", "kind": "image",
+         "aspectRatios": ["1:1"], "resolutions": ["1K"], "credits": {"base": 4}},
+        {"key": "kling", "displayName": "Kling", "kind": "video", "durations": [5, 10],
+         "credits": {"base": 50, "perSecond": 10}},
+    ]}
+
+    class FakeClient:
+        schemas = {}
+
+        async def list_tools(self):
+            return {}
+
+        async def call_tool(self, name, values):
+            return {"content": [{"type": "text", "text": json.dumps(data)}]}
+
+        async def close(self):
+            pass
+
+    specs = asyncio.run(VilvaProvider(client=FakeClient()).discover_models())
+    by = {s.key: s for s in specs}
+    nb = by["vilva:nano-banana-2"]
+    assert nb.title == "Nano Banana 2" and nb.image_field == "image" and nb.simple["aspect_ratio"] == "1:1"
+    cat = Catalog(Config(bot_token="x", vilva_credits_per_credit=1, markup=2), specs)
+    assert cat.estimate_units(nb, {"resolution": "4K"}) == 27
+    assert cat.price(nb, {"resolution": "1K"}) == 24
+    kling = by["vilva:kling"]
+    assert kling.simple["duration"] == "5" and cat.estimate_units(kling, {"duration": "10"}) == 100
