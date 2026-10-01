@@ -153,11 +153,14 @@ class McpClient:
         await self._ensure_initialized()
         return self.schemas
 
-    async def call_tool(self, name: str, values: dict[str, Any]) -> dict:
-        """values — смысловые поля (prompt, model, run_id…), имена берутся из схемы инструмента."""
+    async def call_tool(self, name: str, values: dict[str, Any], raw: dict[str, Any] | None = None) -> dict:
+        """values — смысловые поля (prompt, model, run_id…), имена берутся из схемы инструмента.
+        raw — аргументы с точными именами, добавляются как есть."""
         for attempt in range(2):
             await self._ensure_initialized()
             args = build_args(self.schemas.get(name), values)
+            if raw:
+                args.update(raw)
             try:
                 result = await self._post({
                     "jsonrpc": "2.0", "id": next(self._ids), "method": "tools/call",
@@ -351,33 +354,33 @@ class VilvaProvider:
     async def agent_plan(self, run_id: str) -> Any:
         return payload(await self.client.call_tool("agent_get_plan", {"run_id": run_id}))
 
+    def _answer_arg(self) -> tuple[str, str | None]:
+        """Имя и тип поля ответа в agent_respond (у Vilva это объект answer)."""
+        props = (self.client.schemas.get("agent_respond") or {}).get("properties") or {}
+        name = next((n for n in ("answer", "response", "answers", "reply", "message", "text") if n in props), "answer")
+        return name, (props.get(name) or {}).get("type")
+
+    async def _respond(self, run_id: str, text: str, obj: dict) -> None:
+        name, typ = self._answer_arg()
+        value: Any = text if typ == "string" else obj
+        await self.client.call_tool(
+            "agent_respond", {"run_id": run_id, "resume_key": self.resume_keys.get(run_id)}, raw={name: value})
+
     async def agent_decide(self, run_id: str, approve: bool) -> None:
         decision = "approve" if approve else "reject"
         if self.resume_keys.get(run_id):
-            await self.client.call_tool("agent_respond", {
-                "run_id": run_id, "resume_key": self.resume_keys[run_id], "decision": decision, "answer": decision})
+            await self._respond(run_id, decision, {"approved": approve, "decision": decision})
             return
         schema = self.client.schemas.get("agent_get_plan") or {}
         props = schema.get("properties") or {}
         if any(n in props for n in ALIASES["decision"]):
             await self.client.call_tool("agent_get_plan", {"run_id": run_id, "decision": decision})
         else:
-            await self.client.call_tool("agent_respond", {"run_id": run_id, "answer": decision})
+            await self._respond(run_id, decision, {"approved": approve, "decision": decision})
 
-    async def agent_answer(self, run_id: str, text: str, answers: dict[str, str] | None = None,
-                           use_defaults: bool = False) -> None:
-        """Ответ агенту: текстом и, если схема agent_respond это позволяет, структурно по id вопросов."""
-        values: dict[str, Any] = {"run_id": run_id, "resume_key": self.resume_keys.get(run_id), "answer": text}
-        props = (self.client.schemas.get("agent_respond") or {}).get("properties") or {}
-        name = next((n for n in ALIASES["answers"] if n in props), None)
-        if answers and name:
-            if (props[name] or {}).get("type") == "array":
-                values["answers"] = [{"questionId": k, "answer": v} for k, v in answers.items()]
-            else:
-                values["answers"] = answers
-        if use_defaults and any(n in props for n in ALIASES["defaults"]):
-            values["defaults"] = True
-        await self.client.call_tool("agent_respond", values)
+    async def agent_answer(self, run_id: str, text: str, answers: dict[str, Any] | None = None) -> None:
+        """Ответ агенту. Анкета Vilva ждёт объект {id вопроса: значение}; простой вопрос — {"text": ...}."""
+        await self._respond(run_id, text, answers if answers else {"text": text})
 
     async def agent_cancel(self, run_id: str) -> None:
         await self.client.call_tool("agent_cancel_run", {"run_id": run_id})
@@ -387,9 +390,15 @@ class VilvaProvider:
 class Question:
     id: str
     text: str
-    options: list[str] = field(default_factory=list)
+    options: list[str] = field(default_factory=list)   # подписи
     required: bool = False
     hint: str = ""
+    values: list[str] = field(default_factory=list)    # значения для ответа (по умолчанию = подписи)
+    qtype: str = ""                                    # text | single-choice | multi-choice | file-upload
+    multiple: bool = False
+
+    def value_of(self, i: int) -> str:
+        return self.values[i] if i < len(self.values) else self.options[i]
 
 
 QUESTION_TEXT = ("question", "label", "title", "prompt", "text", "name")
@@ -408,10 +417,18 @@ def _as_question(d: dict, idx: int) -> Question | None:
     if not text:
         return None
     opts = next((d[k] for k in QUESTION_OPTIONS if isinstance(d.get(k), list)), [])
-    options = [lbl for lbl in (_option_label(o) for o in opts) if lbl]
+    options, values = [], []
+    for o in opts:
+        lbl = _option_label(o)
+        if lbl:
+            options.append(lbl)
+            values.append(str(o.get("value", lbl)) if isinstance(o, dict) else lbl)
     qid = str(d.get("id") or d.get("key") or d.get("questionId") or d.get("name") or idx)
-    hint = d.get("description") or d.get("hint") or d.get("helpText") or ""
-    return Question(qid, text.strip(), options, bool(d.get("required")), hint if isinstance(hint, str) else "")
+    hint = d.get("help") or d.get("description") or d.get("hint") or d.get("helpText") or d.get("placeholder") or ""
+    qtype = str(d.get("type") or ("single-choice" if options else "text")).lower()
+    multiple = "multi" in qtype or d.get("multiple") is True and "file" not in qtype
+    return Question(qid, text.strip(), options, bool(d.get("required")), hint if isinstance(hint, str) else "",
+                    values, qtype, bool(multiple))
 
 
 def extract_questions(data: Any) -> list[Question]:

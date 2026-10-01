@@ -316,7 +316,7 @@ def test_agent_questionnaire_in_bot(h):
         {"status": "running"},
         {"status": "completed", "creditsUsed": 3, "assets": [{"url": "https://cdn.vilva/a.png"}]},
     ])
-    SCHEMAS["agent_respond"]["properties"]["answers"] = {"type": "object"}
+    SCHEMAS["agent_respond"]["properties"]["answer"] = {"type": "object"}
 
     async def go(base):
         _agent_harness(h, base)
@@ -337,11 +337,10 @@ def test_agent_questionnaire_in_bot(h):
     try:
         asyncio.run(serve(app, go))
     finally:
-        SCHEMAS["agent_respond"]["properties"].pop("answers", None)
+        SCHEMAS["agent_respond"]["properties"].pop("answer", None)
     sent = state["responded"]
-    assert sent["answers"] == {"tone": "Яркий продающий", "cover": "Вращение на белом фоне",
-                               "photo": "фото нет, сгенерируй"}
-    assert "Тон карточек — Яркий продающий" in sent["response"]
+    assert sent["answer"] == {"tone": "Яркий продающий", "cover": "Вращение на белом фоне",
+                              "photo": "фото нет, сгенерируй"}
     assert h.db.balance(42) == 500 - 6
 
 
@@ -367,7 +366,26 @@ def test_agent_questionnaire_defaults(h):
         await h.app.vilva.close()
 
     asyncio.run(serve(app, go))
-    assert "по умолчанию" in state["responded"]["response"]
+    # поле ответа в этой схеме — строка: шлём текстом; обязательные заполнены первым вариантом
+    sent = state["responded"]["response"]
+    assert "Тон карточек — Минимализм-премиум" in sent and "Вращение на белом фоне" in sent
+
+
+REAL_PLAN = {"runId": "fce852c8", "pending": True, "pauseTool": "ask_user", "resumeKey": "pause_71116653",
+             "question": {"type": "questionnaire", "intro": "Собираю набор для маркетплейса.", "questions": [
+                 {"id": "product", "help": "Например: «Aurora Pro, матовый чёрный»", "type": "text",
+                  "label": "Что за товар?", "required": True, "placeholder": "Aurora Pro"},
+                 {"id": "specs", "type": "multi-choice", "label": "Какие преимущества выносим на инфографику?",
+                  "options": [{"label": "Активное шумоподавление (ANC)", "value": "anc"},
+                              {"label": "До 40 часов автономности", "value": "battery"},
+                              {"label": "Bluetooth 5.3", "value": "bt"}], "required": True},
+                 {"id": "aspect", "type": "single-choice", "label": "Формат карточек",
+                  "options": [{"label": "1:1 — стандарт WB / Ozon", "value": "1:1"},
+                              {"label": "3:4", "value": "3:4"}], "required": True},
+                 {"id": "refs", "type": "file-upload", "label": "Есть фото вашего товара? (необязательно)",
+                  "multiple": True, "required": False}],
+                 "submitLabel": "Собрать набор"},
+             "howToAnswer": "agent_respond with an answer object matching the question payload."}
 
 
 def test_real_pause_format_ask_user(h):
@@ -396,7 +414,7 @@ def test_real_pause_format_ask_user(h):
                 {"name": "agent_get_run", "inputSchema": {"properties": {"runId": {}}}},
                 {"name": "agent_get_plan", "inputSchema": {"properties": {"runId": {}}}},
                 {"name": "agent_respond", "inputSchema": {"properties": {
-                    "runId": {}, "resumeKey": {}, "response": {}, "answers": {"type": "object"}}}},
+                    "runId": {}, "resumeKey": {}, "answer": {"type": "object"}}}},
             ]}})
         name, args = msg["params"]["name"], msg["params"]["arguments"]
         if name == "agent_create_run":
@@ -404,9 +422,7 @@ def test_real_pause_format_ask_user(h):
         if name == "agent_get_run":
             return result(msg["id"], paused if st["phase"] == "paused" else done)
         if name == "agent_get_plan":
-            return result(msg["id"], {"runId": run_id, "pause": {"tool": "ask_user", "input": {"questions": [
-                {"id": "tone", "question": "Тон карточек", "required": True,
-                 "options": ["Минимализм-премиум", "Яркий продающий"]}]}}})
+            return result(msg["id"], REAL_PLAN)
         if name == "agent_respond":
             st["respond"] = args
             st["phase"] = "done"
@@ -420,17 +436,27 @@ def test_real_pause_format_ask_user(h):
         _agent_harness(h, base)
         await h.afeed(h.msg("/agent карточки"), h.cb("am:autopilot"), h.cb("ab:0"))
         for _ in range(300):
-            q = [c for c in h.session.calls if isinstance(c, SendMessage) and c.text.startswith("1. Тон")]
-            if q:
+            if any(c.text == "Когда готово:" for c in h.session.calls if isinstance(c, SendMessage)):
                 break
             await asyncio.sleep(0.01)
-        await h.afeed(h.cb(q[0].reply_markup.inline_keyboard[1][0].callback_data))
+        qs = {c.text.split(".")[0]: c for c in h.session.calls
+              if isinstance(c, SendMessage) and c.text[:2] in ("1.", "2.", "3.")}
+        assert "можно выбрать несколько" in qs["2"].text
+        # 1: текст, 2: несколько вариантов (anc + battery), 3: один вариант
+        await h.afeed(h.cb(qs["1"].reply_markup.inline_keyboard[0][0].callback_data),
+                      h.msg("Aurora Pro, чёрные, накладные"))
+        kb2 = qs["2"].reply_markup.inline_keyboard
+        await h.afeed(h.cb(kb2[0][0].callback_data), h.cb(kb2[1][0].callback_data))
+        assert "responded" not in st or st["respond"] is None   # мультивыбор ждёт «Готово»
+        await h.afeed(h.cb(kb2[-1][0].callback_data))           # Готово
+        await h.afeed(h.cb(qs["3"].reply_markup.inline_keyboard[0][0].callback_data))
         await h.drain()
         await h.app.vilva.close()
 
     asyncio.run(serve(app, go))
     assert st["respond"]["resumeKey"] == "pause_71116653"
-    assert st["respond"]["answers"] == {"tone": "Яркий продающий"}
+    assert st["respond"]["answer"] == {"product": "Aurora Pro, чёрные, накладные",
+                                       "specs": ["anc", "battery"], "aspect": "1:1"}
     assert st["respond"]["runId"] == run_id
     assert h.db.balance(42) == 500 - 14   # credits.used=7 → ×2
     assert any(isinstance(c, SendPhoto) for c in h.session.calls)

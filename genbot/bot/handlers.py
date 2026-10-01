@@ -750,9 +750,13 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
                         # Полный текст вопроса Vilva отдаёт в agent_get_plan.
                         plan = await _fetch_plan(app, run_id)
                         state.questions = extract_questions(plan)
+                        intro = find_key(plan, "intro")
                         if not state.questions:
                             state.text = _question_text(plan) or state.text
-                    await send_questions(app, bot, uid, run_id, gen_id, state)
+                    else:
+                        intro = None
+                    await send_questions(app, bot, uid, run_id, gen_id, state,
+                                         intro if isinstance(intro, str) else "")
             elif state.phase in ("done", "failed", "cancelled"):
                 break
         if loop.time() > deadline:
@@ -777,32 +781,74 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
         await bot.send_message(uid, "Агент остановлен, кредиты вернул")
 
 
-def _question_keyboard(gen_id: int, qi: int, q, chosen: str | None) -> InlineKeyboardMarkup:
+def _short(text: str, n: int = 60) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _is_file(q) -> bool:
+    return "file" in q.qtype or "upload" in q.qtype
+
+
+def _question_keyboard(gen_id: int, qi: int, q, form: dict) -> InlineKeyboardMarkup | None:
+    if _is_file(q):
+        return None
+    answer = form["answers"].get(qi)
     rows = []
-    for oi, opt in enumerate(q.options[:12]):
-        label = ("✅ " if opt == chosen else "") + (opt if len(opt) <= 60 else opt[:57] + "…")
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"aq:{gen_id}:{qi}:{oi}")])
-    custom = chosen is not None and chosen not in q.options
-    rows.append([InlineKeyboardButton(text=("✅ " if custom else "") + "✍️ Свой вариант", callback_data=f"aw:{gen_id}:{qi}")])
+    if q.multiple:
+        chosen = answer if isinstance(answer, list) else []
+        for oi, opt in enumerate(q.options[:15]):
+            mark = "☑️ " if q.value_of(oi) in chosen else "⬜ "
+            rows.append([InlineKeyboardButton(text=mark + _short(opt), callback_data=f"aq:{gen_id}:{qi}:{oi}")])
+        custom = [c for c in chosen if c not in q.values]
+        rows.append([InlineKeyboardButton(text=("✅ " if custom else "") + "✍️ Свой вариант",
+                                          callback_data=f"aw:{gen_id}:{qi}")])
+        done = qi in form["done"]
+        rows.append([InlineKeyboardButton(text="✔️ Выбрано" if done else "✔️ Готово (выбери несколько)",
+                                          callback_data=f"af:{gen_id}:{qi}")])
+    elif q.options:
+        for oi, opt in enumerate(q.options[:15]):
+            mark = "✅ " if answer == q.value_of(oi) else ""
+            rows.append([InlineKeyboardButton(text=mark + _short(opt), callback_data=f"aq:{gen_id}:{qi}:{oi}")])
+        custom = answer is not None and answer not in q.values
+        rows.append([InlineKeyboardButton(text=("✅ " if custom else "") + "✍️ Свой вариант",
+                                          callback_data=f"aw:{gen_id}:{qi}")])
+    else:
+        rows.append([InlineKeyboardButton(text=("✅ " if answer else "") + "✍️ Ответить",
+                                          callback_data=f"aw:{gen_id}:{qi}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def send_questions(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, state) -> None:
+def _answered(form: dict, qi: int) -> bool:
+    q = form["questions"][qi]
+    a = form["answers"].get(qi)
+    if q.multiple:
+        return bool(a) and qi in form["done"]
+    return a not in (None, "", [])
+
+
+async def send_questions(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, state, intro: str = "") -> None:
     questions = state.questions
-    if not questions or (len(questions) == 1 and not questions[0].options):
+    if not questions or (len(questions) == 1 and not questions[0].options and not questions[0].qtype):
         # Простой вопрос — ответ обычным сообщением.
         app.pending[uid] = ("agent_answer", gen_id)
         text = questions[0].text if questions else (state.text or "нужно уточнение")
         await bot.send_message(uid, f"🤖 Вопрос от агента:\n{text}\n\nОтветь сообщением")
         return
-    app.agent_forms[gen_id] = {"run_id": run_id, "uid": uid, "questions": questions, "answers": {}}
-    await bot.send_message(uid, f"🤖 Агенту нужны уточнения ({len(questions)}). Выбери варианты или напиши свои — "
-                                "отправлю, когда ответишь на всё")
+    form = {"run_id": run_id, "uid": uid, "questions": questions, "answers": {}, "done": set(), "msgs": {}}
+    app.agent_forms[gen_id] = form
+    head = f"🤖 {intro}\n\n" if intro else "🤖 "
+    await bot.send_message(uid, head + f"Агенту нужны уточнения ({len(questions)}). Отвечай кнопками или текстом — "
+                                       "отправлю, когда заполнишь обязательные (*)")
     for qi, q in enumerate(questions):
         text = f"{qi + 1}. {q.text}{' *' if q.required else ''}"
+        if q.multiple:
+            text += "\n(можно выбрать несколько)"
         if q.hint:
-            text += f"\n{q.hint}"
-        await bot.send_message(uid, text, reply_markup=_question_keyboard(gen_id, qi, q, None))
+            text += f"\n💡 {q.hint}"
+        if _is_file(q):
+            text += "\n📎 Фото можно приложить в Vilva на сайте; здесь вопрос пропускается"
+        msg = await bot.send_message(uid, text, reply_markup=_question_keyboard(gen_id, qi, q, form))
+        form["msgs"][qi] = getattr(msg, "message_id", None)
     await bot.send_message(uid, "Когда готово:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Отправить ответы", callback_data=f"as:{gen_id}")],
         [InlineKeyboardButton(text="🤷 Пусть агент решит сам", callback_data=f"ad:{gen_id}")],
@@ -819,18 +865,36 @@ def _form_for(app: App, callback_data: str, uid: int) -> tuple[int, dict] | None
     return int(parts[1]), form
 
 
+def _fill_defaults(form: dict) -> None:
+    """«Пусть агент решит сам»: незаполненные обязательные — первый вариант / «на твоё усмотрение»."""
+    for qi, q in enumerate(form["questions"]):
+        if _answered(form, qi) or _is_file(q) or not q.required:
+            continue
+        if q.multiple:
+            form["answers"][qi] = form["answers"].get(qi) or [q.value_of(i) for i in range(min(3, len(q.options)))]
+            form["done"].add(qi)
+        elif q.options:
+            form["answers"][qi] = q.value_of(0)
+        else:
+            form["answers"][qi] = "На твоё усмотрение"
+
+
 async def submit_form(app: App, bot: Bot, gen_id: int, use_defaults: bool = False) -> bool:
     form = app.agent_forms.get(gen_id)
     if form is None:
         return False
-    answers = {form["questions"][i].id: a for i, a in sorted(form["answers"].items())}
     if use_defaults:
-        lines = ["Продолжай со своими вариантами по умолчанию."]
-        lines += [f"{form['questions'][i].text}: {a}" for i, a in sorted(form["answers"].items())]
-    else:
-        lines = [f"{i + 1}. {form['questions'][i].text} — {a}" for i, a in sorted(form["answers"].items())]
+        _fill_defaults(form)
+    qs = form["questions"]
+    answers = {qs[i].id: a for i, a in sorted(form["answers"].items()) if a not in (None, "", [])}
+    lines = []
+    for i, a in sorted(form["answers"].items()):
+        q = qs[i]
+        shown = a if isinstance(a, list) else [a]
+        labels = [q.options[q.values.index(v)] if v in q.values else v for v in shown]
+        lines.append(f"{i + 1}. {q.text} — {', '.join(labels)}")
     try:
-        await app.vilva.agent_answer(form["run_id"], "\n".join(lines), answers or None, use_defaults=use_defaults)
+        await app.vilva.agent_answer(form["run_id"], "\n".join(lines), answers)
     except ProviderError as e:
         log.warning("agent_respond: %s", e)
         await bot.send_message(form["uid"], "Не получилось передать ответы, попробуй ещё раз")
@@ -842,8 +906,19 @@ async def submit_form(app: App, bot: Bot, gen_id: int, use_defaults: bool = Fals
 
 async def _maybe_autosubmit(app: App, bot: Bot, gen_id: int) -> None:
     form = app.agent_forms.get(gen_id)
-    if form and len(form["answers"]) == len(form["questions"]):
+    if form and all(_answered(form, i) for i, q in enumerate(form["questions"]) if not _is_file(q)):
         await submit_form(app, bot, gen_id)
+
+
+async def _refresh_question(bot: Bot, form: dict, gen_id: int, qi: int, message=None) -> None:
+    kb = _question_keyboard(gen_id, qi, form["questions"][qi], form)
+    try:
+        if message is not None:
+            await message.edit_reply_markup(reply_markup=kb)
+        elif form["msgs"].get(qi):
+            await bot.edit_message_reply_markup(chat_id=form["uid"], message_id=form["msgs"][qi], reply_markup=kb)
+    except Exception:
+        pass
 
 
 async def cb_agent_option(callback: CallbackQuery, bot: Bot, app: App) -> None:
@@ -853,12 +928,37 @@ async def cb_agent_option(callback: CallbackQuery, bot: Bot, app: App) -> None:
         return
     gen_id, form = found
     _, _, qi, oi = callback.data.split(":")
-    q = form["questions"][int(qi)]
-    form["answers"][int(qi)] = q.options[int(oi)]
-    try:
-        await callback.message.edit_reply_markup(reply_markup=_question_keyboard(gen_id, int(qi), q, q.options[int(oi)]))
-    except Exception:
-        pass
+    qi, oi = int(qi), int(oi)
+    q = form["questions"][qi]
+    value = q.value_of(oi)
+    if q.multiple:
+        chosen = form["answers"].setdefault(qi, [])
+        if value in chosen:
+            chosen.remove(value)
+        else:
+            chosen.append(value)
+        form["done"].discard(qi)
+        await _refresh_question(bot, form, gen_id, qi, callback.message)
+        await callback.answer(f"Выбрано: {len(chosen)}. Нажми «Готово», когда закончишь")
+        return
+    form["answers"][qi] = value
+    await _refresh_question(bot, form, gen_id, qi, callback.message)
+    await callback.answer("Принято")
+    await _maybe_autosubmit(app, bot, gen_id)
+
+
+async def cb_agent_done(callback: CallbackQuery, bot: Bot, app: App) -> None:
+    found = _form_for(app, callback.data, callback.from_user.id)
+    if not found:
+        await callback.answer("Вопрос уже неактуален", show_alert=True)
+        return
+    gen_id, form = found
+    qi = int(callback.data.split(":")[2])
+    if not form["answers"].get(qi):
+        await callback.answer("Выбери хотя бы один вариант", show_alert=True)
+        return
+    form["done"].add(qi)
+    await _refresh_question(bot, form, gen_id, qi, callback.message)
     await callback.answer("Принято")
     await _maybe_autosubmit(app, bot, gen_id)
 
@@ -870,8 +970,10 @@ async def cb_agent_custom(callback: CallbackQuery, app: App) -> None:
         return
     gen_id, form = found
     qi = int(callback.data.split(":")[2])
+    q = form["questions"][qi]
     app.pending[callback.from_user.id] = ("agent_form_text", gen_id, qi)
-    await callback.message.answer(f"Напиши свой вариант: {form['questions'][qi].text}")
+    hint = f"\nНапример: {q.hint}" if q.hint and not q.options else ""
+    await callback.message.answer(f"Напиши ответ: {q.text}{hint}")
     await callback.answer()
 
 
@@ -880,8 +982,15 @@ async def agent_form_text(message: Message, app: App, gen_id: int, qi: int) -> N
     if form is None:
         await message.answer("Вопрос уже неактуален")
         return
-    form["answers"][qi] = message.text.strip()
-    await message.answer("Принято ✅")
+    q = form["questions"][qi]
+    text = message.text.strip()
+    if q.multiple:
+        form["answers"].setdefault(qi, []).append(text)
+        await message.answer("Добавил ✅ Отметь ещё варианты или нажми «Готово»")
+    else:
+        form["answers"][qi] = text
+        await message.answer("Принято ✅")
+    await _refresh_question(message.bot, form, gen_id, qi)
     await _maybe_autosubmit(app, message.bot, gen_id)
 
 
@@ -891,7 +1000,11 @@ async def cb_agent_submit(callback: CallbackQuery, bot: Bot, app: App) -> None:
         await callback.answer("Уже отправлено", show_alert=True)
         return
     gen_id, form = found
-    missing = [i + 1 for i, q in enumerate(form["questions"]) if q.required and i not in form["answers"]]
+    for qi, q in enumerate(form["questions"]):
+        if q.multiple and form["answers"].get(qi):
+            form["done"].add(qi)
+    missing = [i + 1 for i, q in enumerate(form["questions"])
+               if q.required and not _is_file(q) and not _answered(form, i)]
     if missing:
         await callback.answer(f"Ответь на обязательные: {', '.join(map(str, missing))} — или «пусть решит сам»",
                               show_alert=True)
@@ -1064,6 +1177,7 @@ def create_router() -> Router:
     r.callback_query.register(cb_agent_cancel, F.data.startswith("ac:"))
     r.callback_query.register(cb_agent_option, F.data.startswith("aq:"))
     r.callback_query.register(cb_agent_custom, F.data.startswith("aw:"))
+    r.callback_query.register(cb_agent_done, F.data.startswith("af:"))
     r.callback_query.register(cb_agent_submit, F.data.startswith("as:"))
     r.callback_query.register(cb_agent_defaults, F.data.startswith("ad:"))
     r.pre_checkout_query.register(pre_checkout)
