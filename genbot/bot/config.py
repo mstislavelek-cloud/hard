@@ -43,7 +43,7 @@ class Config:
     default_video_model: str = "mage:lemon"
     # Бюджеты агента в кредитах бота, из которых выбирает пользователь.
     agent_budgets: tuple[int, ...] = (50, 150, 400)
-    free_credits: int = 3
+    free_credits: int = 3  # «3 кредита в подарок» нарисовано на баннере bot/assets/welcome.jpg
     admin_ids: frozenset[int] = field(default_factory=frozenset)
     support_contact: str = "@support"
     packs: tuple[Pack, ...] = DEFAULT_PACKS

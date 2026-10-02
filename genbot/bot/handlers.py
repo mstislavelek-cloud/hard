@@ -353,7 +353,7 @@ def values_view(app: App, user_id: int, kind: str, name: str, ret: str = "p") ->
     return f"{PARAM_LABELS.get(name, name)} для {spec.title} (цена в кредитах):", InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-WELCOME_IMAGE = os.path.join(os.path.dirname(__file__), "assets", "welcome.png")
+WELCOME_IMAGE = os.path.join(os.path.dirname(__file__), "assets", "welcome.jpg")
 
 
 def help_text(app: App) -> str:
