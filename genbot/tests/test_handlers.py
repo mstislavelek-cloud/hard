@@ -210,3 +210,12 @@ def test_negative_prompt_param(h):
     assert h.provider.calls[-1][2]["negative_prompt"] == "blurry, lowres"
     h.feed(h.cb("pt:image:negative_prompt"), h.msg("0"))
     assert "negative_prompt" not in h.db.get_settings(42)["params"]["mock:image"]
+
+
+def test_buy_shows_price_image(h):
+    from aiogram.methods import SendPhoto
+
+    h.feed(h.msg("/buy"), h.msg("/buy"))
+    photos = [c for c in h.session.calls if isinstance(c, SendPhoto)]
+    assert len(photos) == 2 and photos[0].caption == "Выбери пакет:"
+    assert photos[0].reply_markup.inline_keyboard[0][0].callback_data.startswith("buy:")

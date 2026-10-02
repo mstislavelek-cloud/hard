@@ -89,7 +89,8 @@ class App:
     agent_forms: dict[int, dict] = field(default_factory=dict)
     tasks: set[asyncio.Task] = field(default_factory=set)
     agent_poll: float = AGENT_POLL
-    welcome_file_id: str | None = None
+    # Картинки из assets, уже загруженные в Telegram: путь → file_id.
+    file_ids: dict[str, str] = field(default_factory=dict)
 
     @property
     def vilva(self):
@@ -354,6 +355,8 @@ def values_view(app: App, user_id: int, kind: str, name: str, ret: str = "p") ->
 
 
 WELCOME_IMAGE = os.path.join(os.path.dirname(__file__), "assets", "welcome.jpg")
+# Прайс с пакетами — цифры нарисованы, при смене DEFAULT_PACKS картинку надо перегенерировать.
+PRICES_IMAGE = os.path.join(os.path.dirname(__file__), "assets", "prices.jpg")
 
 
 def help_text(app: App) -> str:
@@ -396,20 +399,25 @@ async def safe_edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMa
 
 # ---------- базовые команды ----------
 
+async def answer_with_image(message: Message, app: App, path: str, text: str, markup) -> None:
+    """Сообщение с картинкой из assets; file_id запоминается, чтобы не загружать файл каждый раз."""
+    if os.path.exists(path):
+        photo = app.file_ids.get(path) or FSInputFile(path)
+        try:
+            sent = await message.answer_photo(photo, caption=text, parse_mode="HTML", reply_markup=markup)
+            if sent.photo:
+                app.file_ids.setdefault(path, sent.photo[-1].file_id)
+            return
+        except Exception:
+            log.exception("Не удалось отправить картинку %s", path)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
 async def cmd_start(message: Message, app: App) -> None:
     user = message.from_user
     is_new = app.db.ensure_user(user.id, user.username, app.cfg.free_credits)
     text = welcome_text(app, user.first_name or "друг", is_new)
-    if os.path.exists(WELCOME_IMAGE):
-        photo = app.welcome_file_id or FSInputFile(WELCOME_IMAGE)
-        try:
-            sent = await message.answer_photo(photo, caption=text, parse_mode="HTML", reply_markup=main_menu(app))
-            if sent.photo and not app.welcome_file_id:
-                app.welcome_file_id = sent.photo[-1].file_id
-            return
-        except Exception:
-            log.exception("Не удалось отправить картинку приветствия")
-    await message.answer(text, parse_mode="HTML", reply_markup=main_menu(app))
+    await answer_with_image(message, app, WELCOME_IMAGE, text, main_menu(app))
 
 
 async def cmd_help(message: Message, app: App) -> None:
@@ -425,12 +433,12 @@ async def cmd_balance(message: Message, app: App) -> None:
     if spec:
         per = app.catalog.price(spec, params_of(app, s, spec))
         hint = f"\nЭтого хватит примерно на <b>{bal // per}</b> картинок в {html.escape(spec.title)}" if per else ""
-    await message.answer(f"💰 Баланс: <b>{bal} кр</b>{hint}\n\nПополнить за ⭐ Telegram Stars:",
-                         parse_mode="HTML", reply_markup=packs_keyboard(app.cfg))
+    await answer_with_image(message, app, PRICES_IMAGE,
+                            f"💰 Баланс: <b>{bal} кр</b>{hint}\n\nПополнить за ⭐ Telegram Stars:", packs_keyboard(app.cfg))
 
 
 async def cmd_buy(message: Message, app: App) -> None:
-    await message.answer("Выбери пакет:", reply_markup=packs_keyboard(app.cfg))
+    await answer_with_image(message, app, PRICES_IMAGE, "Выбери пакет:", packs_keyboard(app.cfg))
 
 
 async def cmd_terms(message: Message, app: App) -> None:
