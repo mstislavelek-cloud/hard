@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
+import os
+import re
 import math
 from dataclasses import dataclass, field
 
@@ -12,6 +15,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -72,6 +76,7 @@ class App:
     agent_forms: dict[int, dict] = field(default_factory=dict)
     tasks: set[asyncio.Task] = field(default_factory=set)
     agent_poll: float = AGENT_POLL
+    welcome_file_id: str | None = None
 
     @property
     def vilva(self):
@@ -118,10 +123,19 @@ def sorted_models(app: App, kind: str) -> list[ModelSpec]:
 
 
 def provider_tag(m: ModelSpec) -> str:
+    """Только для админских отчётов: пользователю провайдеры не показываются."""
     return {"mage": "Mage", "vilva": "Vilva"}.get(m.provider, "тест")
 
 
 PARAM_ICONS = {"aspect_ratio": "📐", "resolution": "🔍", "duration": "⏱"}
+EXAMPLES = {
+    "image": ("кроссовки на белом фоне, мягкий студийный свет",
+              "уютная кофейня в дождливом Париже, акварель",
+              "логотип лисы в минималистичном стиле"),
+    "video": ("волны разбиваются о скалы на закате, медленный пролёт камеры",
+              "кот в очках печатает на ноутбуке, крупный план",
+              "неоновый город ночью, дрон пролетает между небоскрёбами"),
+}
 
 
 def kind_panel(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardMarkup | None]:
@@ -130,30 +144,44 @@ def kind_panel(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardMa
     if spec is None:
         return "Модели этого типа сейчас недоступны", None
     params = params_of(app, s, spec)
-    rows = [[InlineKeyboardButton(text=f"🧠 {provider_tag(spec)} · {spec.title}", callback_data=f"sm:{kind}:k")]]
+    rows = [[InlineKeyboardButton(text=f"🧠 Модель: {spec.title}", callback_data=f"sm:{kind}:k")]]
     quick = []
     for name in QUICK_PARAMS:
         if name in spec.options:
             v = params.get(name, spec.options[name][0])
-            label = f"{v} сек" if name == "duration" else v
+            label = f"{v} сек" if name == "duration" else vlabel(v)
             quick.append(InlineKeyboardButton(text=f"{PARAM_ICONS[name]} {label}", callback_data=f"pp:{kind}:{name}:k"))
     if quick:
         rows.append(quick)
-    rows.append([InlineKeyboardButton(text="🧪 Продвинутые настройки", callback_data=f"sx:{kind}")])
-    if kind == "image":
-        hint = ("Опиши картинку, например: «кроссовки на белом фоне, студийный свет». "
-                "Можно прислать фото с подписью — изменю его")
-    else:
-        hint = ("Опиши видео, например: «волны разбиваются о скалы на закате, медленный пролёт камеры». "
-                "Можно прислать фото с подписью — оживлю его")
-    text = (f"{'🖼 Картинка' if kind == 'image' else '🎬 Видео'}\n"
-            f"Модель: {provider_tag(spec)} · {spec.title} — ~{app.catalog.price(spec, params)} кр\n"
-            f"Параметры: {describe_params(spec, params)}\n\n✍️ {hint}")
+    rows.append([InlineKeyboardButton(text="🧪 Ещё настройки", callback_data=f"sx:{kind}")])
+    price = app.catalog.price(spec, params)
+    example = EXAMPLES[kind][user_id % len(EXAMPLES[kind])]
+    photo_hint = "изменю его" if kind == "image" else "оживлю его"
+    title = "🖼 <b>Картинка</b>" if kind == "image" else "🎬 <b>Видео</b>"
+    note = f"\n<i>{html.escape(spec.note)}</i>" if spec.note else ""
+    text = (f"{title}\n\n"
+            f"🧠 <b>{html.escape(spec.title)}</b>{note}\n"
+            f"⚙️ {html.escape(describe_params(spec, params) or 'стандартные настройки')}\n"
+            f"💎 Стоимость: <b>{price} кр</b> · на балансе {app.db.balance(user_id)} кр\n\n"
+            f"✍️ Напиши, что {'нарисовать' if kind == 'image' else 'снять'}, например:\n"
+            f"<i>«{example}»</i>\n"
+            f"📎 Или пришли фото с подписью — {photo_hint}")
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def vlabel(v: str) -> str:
+    """Подпись значения: true/false → вкл/выкл, 1k → 1K, 480P → 480p."""
+    if v in VALUE_LABELS:
+        return VALUE_LABELS[v]
+    if re.fullmatch(r"\d+k", v):
+        return v.upper()
+    if re.fullmatch(r"\d+P", v):
+        return v.lower()
+    return v
+
+
 def describe_params(spec: ModelSpec, params: dict[str, str]) -> str:
-    parts = [f"{PARAM_LABELS.get(k, k)}: {VALUE_LABELS.get(v, v)}" for k, v in params.items() if k != "seed"]
+    parts = [f"{PARAM_LABELS.get(k, k)}: {vlabel(v)}" for k, v in params.items() if k != "seed"]
     if "seed" in params:
         parts.append(f"seed: {params['seed']}")
     return ", ".join(parts)
@@ -208,16 +236,17 @@ def _range_text(lo: int, hi: int) -> str:
     return f"{lo} кр" if lo == hi else f"{lo}–{hi} кр"
 
 
-def picker_providers(app: App, kind: str) -> list[str]:
-    order = {"mage": 0, "vilva": 1}
-    return sorted({m.provider for m in app.catalog.by_kind(kind)}, key=lambda p: (order.get(p, 9), p))
-
-
-def picker_families(app: App, kind: str, provider: str) -> list[tuple[str, list[ModelSpec]]]:
+def picker_families(app: App, kind: str) -> list[tuple[str, list[ModelSpec]]]:
+    """Семейства моделей без разделения по провайдерам; одинаковые модели — самая дешёвая."""
     groups: dict[str, list[ModelSpec]] = {}
+    seen: set[tuple[str, str]] = set()
     for m in sorted_models(app, kind):
-        if m.provider == provider:
-            groups.setdefault(family_of(m), []).append(m)
+        fam = family_of(m)
+        title_key = (fam, re.sub(r"[^a-z0-9]", "", m.title.lower()))
+        if title_key in seen:
+            continue
+        seen.add(title_key)
+        groups.setdefault(fam, []).append(m)
     return sorted(groups.items(), key=lambda kv: (min(app.catalog.price_range(m)[0] for m in kv[1]), kv[0]))
 
 
@@ -226,59 +255,40 @@ def _back(kind: str, ret: str) -> str:
 
 
 def models_view(app: App, user_id: int, kind: str, ret: str = "s") -> tuple[str, InlineKeyboardMarkup]:
-    """Шаг 1: провайдер."""
-    providers = picker_providers(app, kind)
-    if len(providers) == 1:
-        return families_view(app, user_id, kind, 0, ret)
+    """Шаг 1: семейство моделей."""
     current = model_of(app, settings_of(app, user_id), kind)
-    rows = []
-    for pi, prov in enumerate(providers):
-        models = [m for m in app.catalog.by_kind(kind) if m.provider == prov]
+    rows, row = [], []
+    for fi, (fam, models) in enumerate(picker_families(app, kind)):
         lo = min(app.catalog.price_range(m)[0] for m in models)
-        mark = "✅ " if current and current.provider == prov else ""
-        name = {"mage": "Mage", "vilva": "Vilva"}.get(prov, prov)
-        rows.append([InlineKeyboardButton(text=f"{mark}{name} · {len(models)} мод. · от {lo} кр",
-                                          callback_data=f"mf:{kind}:{pi}:{ret}")])
+        mark = "✅ " if current and any(m.key == current.key for m in models) else ""
+        row.append(InlineKeyboardButton(text=f"{mark}{fam} · от {lo}", callback_data=f"mm:{kind}:{fi}:{ret}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     rows.append([InlineKeyboardButton(text="« Назад", callback_data=_back(kind, ret))])
-    return f"Выбери провайдера {KIND_LABEL[kind]}:", InlineKeyboardMarkup(inline_keyboard=rows)
+    text = (f"🧠 <b>Выбери семейство моделей</b> {'для картинок' if kind == 'image' else 'для видео'}\n"
+            "Цена — от, в кредитах")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def families_view(app: App, user_id: int, kind: str, pi: int, ret: str) -> tuple[str, InlineKeyboardMarkup]:
-    """Шаг 2: семейство моделей провайдера."""
-    providers = picker_providers(app, kind)
-    prov = providers[min(pi, len(providers) - 1)]
-    current = model_of(app, settings_of(app, user_id), kind)
-    rows = []
-    for fi, (fam, models) in enumerate(picker_families(app, kind, prov)):
-        lo = min(app.catalog.price_range(m)[0] for m in models)
-        hi = max(app.catalog.price_range(m)[1] for m in models)
-        mark = "✅ " if current and current in models else ""
-        count = f" · {len(models)} мод." if len(models) > 1 else ""
-        rows.append([InlineKeyboardButton(text=f"{mark}{fam}{count} · {_range_text(lo, hi)}",
-                                          callback_data=f"mm:{kind}:{pi}:{fi}:{ret}")])
-    back = f"sm:{kind}:{ret}" if len(providers) > 1 else _back(kind, ret)
-    rows.append([InlineKeyboardButton(text="« Назад", callback_data=back)])
-    name = {"mage": "Mage", "vilva": "Vilva"}.get(prov, prov)
-    return f"{name}: выбери семейство моделей {KIND_LABEL[kind]}", InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def family_models_view(app: App, user_id: int, kind: str, pi: int, fi: int, ret: str):
-    """Шаг 3: конкретная модель семейства."""
-    providers = picker_providers(app, kind)
-    prov = providers[min(pi, len(providers) - 1)]
-    families = picker_families(app, kind, prov)
+def family_models_view(app: App, user_id: int, kind: str, fi: int, ret: str):
+    """Шаг 2: конкретная модель семейства."""
+    families = picker_families(app, kind)
     fam, models = families[min(fi, len(families) - 1)]
     current = model_of(app, settings_of(app, user_id), kind)
     all_models = sorted_models(app, kind)
-    lines = [f"{fam} — выбери модель (цена зависит от разрешения, качества и длительности):\n"]
+    lines = [f"🧠 <b>{html.escape(fam)}</b> — выбери модель\n"]
     rows = []
     for n, m in enumerate(models, 1):
         lo, hi = app.catalog.price_range(m)
         mark = "✅ " if current and m.key == current.key else ""
-        lines.append(f"{n}. {m.title} — {_range_text(lo, hi)}" + (f". {m.note}" if m.note else ""))
+        note = f" — <i>{html.escape(m.note)}</i>" if m.note else ""
+        lines.append(f"{n}. <b>{html.escape(m.title)}</b> · {_range_text(lo, hi)}{note}")
         rows.append([InlineKeyboardButton(text=f"{mark}{n}. {m.title} · {_range_text(lo, hi)}",
                                           callback_data=f"pm:{kind}:{all_models.index(m)}:{ret}")])
-    rows.append([InlineKeyboardButton(text="« Назад", callback_data=f"mf:{kind}:{pi}:{ret}")])
+    rows.append([InlineKeyboardButton(text="« Назад", callback_data=f"sm:{kind}:{ret}")])
     return "\n".join(lines)[:4000], InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -294,7 +304,7 @@ def params_view(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardM
     rows.append([InlineKeyboardButton(text=f"🎲 Seed: {params.get('seed', 'случайный')}", callback_data=f"ps:{kind}")])
     rows.append([
         InlineKeyboardButton(text="↩️ Сбросить", callback_data=f"pr:{kind}"),
-        InlineKeyboardButton(text="« Назад", callback_data="settings"),
+        InlineKeyboardButton(text="« Назад", callback_data=f"kp:{kind}"),
     ])
     text = (f"🔧 {spec.title}\nТекущие: {describe_params(spec, params)}\n"
             f"Цена с этими параметрами: ~{app.catalog.price(spec, params)} кр")
@@ -319,23 +329,45 @@ def values_view(app: App, user_id: int, kind: str, name: str, ret: str = "p") ->
     return f"{PARAM_LABELS.get(name, name)} для {spec.title} (цена в кредитах):", InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+WELCOME_IMAGE = os.path.join(os.path.dirname(__file__), "assets", "welcome.png")
+
+
 def help_text(app: App) -> str:
     text = (
-        "Генерирую картинки и видео лучшими моделями.\n\n"
-        f"{BTN_IMAGE} / {BTN_VIDEO} — выбрать, что генерировать, потом просто пиши описание\n"
-        "📎 Фото с подписью — правка картинки или оживление фото (в режиме видео)\n"
-        f"{BTN_SETTINGS} — модели и продвинутый режим со всеми параметрами\n"
+        "<b>Как пользоваться</b>\n\n"
+        f"{BTN_IMAGE} или {BTN_VIDEO} — выбери модель, формат и качество, потом просто пиши, что хочешь увидеть\n"
+        "📎 <b>Фото с подписью</b> — изменю картинку или оживлю фото в видео\n"
+        f"{BTN_SETTINGS} — модели и продвинутые параметры\n"
     )
     if app.vilva:
-        text += f"{BTN_AGENT} — креативный агент: опиши задачу, он спланирует и сделает проект целиком\n"
-    return text + "\n/balance — баланс, /buy — пополнить, /terms — условия, /paysupport — помощь с оплатой"
+        text += f"{BTN_AGENT} — опиши задачу целиком: агент сам спланирует и сделает набор картинок и видео\n"
+    return text + ("\n💎 Цена каждой генерации видна заранее, при ошибке кредиты возвращаются\n"
+                   "/balance — баланс · /buy — пополнить · /terms — условия · /paysupport — помощь")
 
 
-async def safe_edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
+def welcome_text(app: App, name: str, is_new: bool) -> str:
+    image_count = len(app.catalog.by_kind("image"))
+    video_count = len(app.catalog.by_kind("video"))
+    gift = f"\n🎁 Дарю <b>{app.cfg.free_credits} кредита</b>, чтобы попробовать\n" if is_new else ""
+    agent = "\n🤖 <b>Агент</b> — опиши задачу целиком, он сам всё спланирует и сделает" if app.vilva else ""
+    return (
+        f"<b>Привет, {html.escape(name)}!</b> 👋\n\n"
+        "Я — твоя студия нейросетей прямо в Telegram ✨\n\n"
+        f"🖼 <b>Картинки</b> — {image_count} моделей: GPT Image, Nano Banana, Seedream, Flux, Midjourney и другие\n"
+        f"🎬 <b>Видео</b> — {video_count} моделей: из текста или оживляю твоё фото"
+        f"{agent}\n{gift}\n"
+        "Жми кнопку внизу и пиши, что хочешь увидеть 👇"
+    )
+
+
+async def safe_edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
+    """Редактирует сообщение меню (HTML); если нельзя (например, это фото) — шлёт новое."""
     try:
-        await callback.message.edit_text(text, reply_markup=markup)
-    except Exception:
-        await callback.message.answer(text, reply_markup=markup)
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        if "not modified" in str(e):
+            return
+        await callback.message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 # ---------- базовые команды ----------
@@ -343,17 +375,34 @@ async def safe_edit(callback: CallbackQuery, text: str, markup: InlineKeyboardMa
 async def cmd_start(message: Message, app: App) -> None:
     user = message.from_user
     is_new = app.db.ensure_user(user.id, user.username, app.cfg.free_credits)
-    greeting = f"Привет! Дарю {app.cfg.free_credits} бесплатных кредита.\n\n" if is_new else ""
-    await message.answer(greeting + help_text(app), reply_markup=main_menu(app))
+    text = welcome_text(app, user.first_name or "друг", is_new)
+    if os.path.exists(WELCOME_IMAGE):
+        photo = app.welcome_file_id or FSInputFile(WELCOME_IMAGE)
+        try:
+            sent = await message.answer_photo(photo, caption=text, parse_mode="HTML", reply_markup=main_menu(app))
+            if sent.photo and not app.welcome_file_id:
+                app.welcome_file_id = sent.photo[-1].file_id
+            return
+        except Exception:
+            log.exception("Не удалось отправить картинку приветствия")
+    await message.answer(text, parse_mode="HTML", reply_markup=main_menu(app))
 
 
 async def cmd_help(message: Message, app: App) -> None:
-    await message.answer(help_text(app), reply_markup=main_menu(app))
+    await message.answer(help_text(app), parse_mode="HTML", reply_markup=main_menu(app))
 
 
 async def cmd_balance(message: Message, app: App) -> None:
     app.db.ensure_user(message.from_user.id, message.from_user.username, app.cfg.free_credits)
-    await message.answer(f"Баланс: {app.db.balance(message.from_user.id)} кр.", reply_markup=packs_keyboard(app.cfg))
+    bal = app.db.balance(message.from_user.id)
+    s = settings_of(app, message.from_user.id)
+    spec = model_of(app, s, "image")
+    hint = ""
+    if spec:
+        per = app.catalog.price(spec, params_of(app, s, spec))
+        hint = f"\nЭтого хватит примерно на <b>{bal // per}</b> картинок в {html.escape(spec.title)}" if per else ""
+    await message.answer(f"💰 Баланс: <b>{bal} кр</b>{hint}\n\nПополнить за ⭐ Telegram Stars:",
+                         parse_mode="HTML", reply_markup=packs_keyboard(app.cfg))
 
 
 async def cmd_buy(message: Message, app: App) -> None:
@@ -392,7 +441,7 @@ async def btn_kind(message: Message, app: App) -> None:
     s["kind"] = kind
     app.db.save_settings(user.id, s)
     text, kb = kind_panel(app, user.id, kind)
-    await message.answer(text, reply_markup=kb)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 # ---------- настройки: колбэки ----------
@@ -433,24 +482,16 @@ async def cb_models(callback: CallbackQuery, app: App) -> None:
     await callback.answer()
 
 
-async def cb_families(callback: CallbackQuery, app: App) -> None:
-    _, kind, pi, ret = callback.data.split(":")
-    text, kb = families_view(app, callback.from_user.id, kind, int(pi), ret)
-    await safe_edit(callback, text, kb)
-    await callback.answer()
-
-
 async def cb_family_models(callback: CallbackQuery, app: App) -> None:
-    _, kind, pi, fi, ret = callback.data.split(":")
-    providers = picker_providers(app, kind)
-    families = picker_families(app, kind, providers[min(int(pi), len(providers) - 1)])
+    _, kind, fi, ret = callback.data.split(":")
+    families = picker_families(app, kind)
     models = families[min(int(fi), len(families) - 1)][1]
     if len(models) == 1:
         # В семействе одна модель — выбираем сразу.
         callback_data = f"pm:{kind}:{sorted_models(app, kind).index(models[0])}:{ret}"
         await _pick(callback, app, callback_data)
         return
-    text, kb = family_models_view(app, callback.from_user.id, kind, int(pi), int(fi), ret)
+    text, kb = family_models_view(app, callback.from_user.id, kind, int(fi), ret)
     await safe_edit(callback, text, kb)
     await callback.answer()
 
@@ -719,8 +760,9 @@ async def notify_admins(app: App, bot: Bot, text: str) -> None:
             log.exception("Не удалось уведомить админа %s", admin)
 
 
-async def generate(app: App, bot: Bot, message: Message, kind: str, prompt: str, image: bytes | None = None) -> None:
-    user = message.from_user
+async def generate(app: App, bot: Bot, message: Message, kind: str, prompt: str, image: bytes | None = None,
+                   user=None) -> None:
+    user = user or message.from_user
     app.db.ensure_user(user.id, user.username, app.cfg.free_credits)
     reason = check_prompt(prompt)
     if reason:
@@ -753,14 +795,24 @@ async def generate(app: App, bot: Bot, message: Message, kind: str, prompt: str,
         return
 
     app.busy.add(user.id)
-    wait = "пару минут" if kind == "video" else "несколько секунд"
-    status = await message.answer(f"Генерирую на {spec.title} (~{cost} кр), это займёт {wait}…")
+    s["last_prompt"] = {**s.get("last_prompt", {}), kind: prompt}
+    app.db.save_settings(user.id, s)
+    wait = "обычно 1–3 минуты" if kind == "video" else "несколько секунд"
+    verb = "🎬 Снимаю видео" if kind == "video" else "🎨 Рисую"
+    status = await message.answer(f"{verb} в <b>{html.escape(spec.title)}</b>…\n⏳ {wait}", parse_mode="HTML")
+    try:
+        await bot.send_chat_action(message.chat.id, "upload_video" if kind == "video" else "upload_photo")
+    except Exception:
+        pass
     ok, final, error = False, cost, None
     try:
         result = await asyncio.wait_for(provider.generate(spec, prompt, params, image), GENERATION_TIMEOUT)
-        await send_media(message, kind, result.media)
-        ok = True
         actual = app.catalog.credits(spec, result.units) if result.units else None
+        expected = actual if actual is not None else cost
+        balance_after = app.db.balance(user.id) + cost - expected
+        caption = (f"✨ <b>{html.escape(spec.title)}</b> · −{expected} кр · баланс {max(balance_after, 0)} кр")
+        await send_media(message, kind, result.media, caption, result_keyboard(kind))
+        ok = True
         final = app.db.finish(gen_id, True, actual)
     except ProviderError as e:
         error = e
@@ -779,14 +831,31 @@ async def generate(app: App, bot: Bot, message: Message, kind: str, prompt: str,
         except Exception:
             pass
     if ok:
-        await message.answer(f"−{final} кр, баланс {app.db.balance(user.id)} кр")
         return
     if error.code in ("insufficient_gems", "insufficient_credits"):
         await notify_admins(app, bot, f"⚠️ У провайдера {spec.provider} кончился баланс: {error}")
     await message.answer((error.user_message or "Не получилось сгенерировать.") + " Кредиты вернул")
 
 
-async def send_media(message: Message, kind: str, media: Media) -> None:
+def result_keyboard(kind: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔁 Ещё вариант", callback_data=f"rg:{kind}"),
+        InlineKeyboardButton(text="🎛 Параметры", callback_data=f"kp:{kind}"),
+    ]])
+
+
+async def cb_regenerate(callback: CallbackQuery, bot: Bot, app: App) -> None:
+    kind = callback.data.split(":")[1]
+    prompt = settings_of(app, callback.from_user.id).get("last_prompt", {}).get(kind)
+    if not prompt:
+        await callback.answer("Не нашёл прошлый запрос — напиши его заново", show_alert=True)
+        return
+    await callback.answer("Генерирую ещё вариант")
+    await generate(app, bot, callback.message, kind, prompt, user=callback.from_user)
+
+
+async def send_media(message: Message, kind: str, media: Media, caption: str | None = None,
+                     markup: InlineKeyboardMarkup | None = None) -> None:
     if media.data is not None:
         file = BufferedInputFile(media.data, filename=media.filename)
     elif media.url:
@@ -794,16 +863,17 @@ async def send_media(message: Message, kind: str, media: Media) -> None:
     else:
         raise ProviderError("пустой результат")
     name = media.filename.lower()
+    extra = {"caption": caption, "parse_mode": "HTML", "reply_markup": markup} if caption else {}
     if name.endswith((".mp4", ".mov", ".webm")):
-        await message.answer_video(file)
+        await message.answer_video(file, **extra)
     elif kind == "image" and name.endswith((".png", ".jpg", ".jpeg", ".webp")):
         try:
-            await message.answer_photo(file)
+            await message.answer_photo(file, **extra)
         except Exception:
             # Большие картинки (2K+) телега может не принять как фото — шлём файлом.
-            await message.answer_document(file)
+            await message.answer_document(file, **extra)
     else:
-        await message.answer_document(file)
+        await message.answer_document(file, **extra)
 
 
 # ---------- агент Vilva ----------
@@ -1197,7 +1267,7 @@ async def send_questions(app: App, bot: Bot, uid: int, run_id: str, gen_id: int,
         if q.hint:
             text += f"\n💡 {q.hint}"
         if _is_file(q):
-            text += "\n📎 Фото можно приложить в Vilva на сайте; здесь вопрос пропускается"
+            text += "\n📎 Этот вопрос можно пропустить — агент обойдётся без фото"
         msg = await bot.send_message(uid, text, reply_markup=_question_keyboard(gen_id, qi, q, form))
         form["msgs"][qi] = getattr(msg, "message_id", None)
     await bot.send_message(uid, "Когда готово:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -1418,7 +1488,7 @@ def _format_plan(plan) -> str:
                 lines.append(f"{i}. {title}")
         est = plan.get("estimatedCredits") or plan.get("creditEstimate") or plan.get("estimate")
         if est is not None:
-            lines.append(f"\nСмета Vilva: {est}")
+            lines.append(f"\nСмета: {est}")
         if lines:
             return "\n".join(lines)
         q = plan.get("question")
@@ -1509,7 +1579,7 @@ async def send_agent_result(bot: Bot, uid: int, state, urls: list[str] | None = 
     if text:
         await bot.send_message(uid, text[:3500])
     if not sent:
-        await bot.send_message(uid, "Готовых картинок или видео не нашёл — проверь рабочее пространство в Vilva")
+        await bot.send_message(uid, "Готовых картинок или видео агент не прислал — попробуй уточнить задачу")
 
 
 # ---------- роутер ----------
@@ -1543,7 +1613,7 @@ def create_router() -> Router:
     r.callback_query.register(cb_settings, F.data == "settings")
     r.callback_query.register(cb_models, F.data.startswith("sm:"))
     r.callback_query.register(cb_kind_panel, F.data.startswith("kp:"))
-    r.callback_query.register(cb_families, F.data.startswith("mf:"))
+    r.callback_query.register(cb_regenerate, F.data.startswith("rg:"))
     r.callback_query.register(cb_family_models, F.data.startswith("mm:"))
     r.callback_query.register(cb_advanced_from_panel, F.data.startswith("sx:"))
     r.callback_query.register(cb_pick_model, F.data.startswith("pm:"))

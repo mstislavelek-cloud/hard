@@ -144,7 +144,7 @@ def test_admin_prices_audit(h):
     assert "Курсы:" in text and "Тестовая картинка" in text and "→" in text
 
 
-def test_model_picker_provider_family_model(tmp_path):
+def test_model_picker_family_then_model_without_providers(tmp_path):
     from bot.catalog import MOCK_MODELS, ModelSpec
     from tests.conftest import Harness
 
@@ -153,24 +153,48 @@ def test_model_picker_provider_family_model(tmp_path):
                     price_table={"resolution": {"1K": 6, "2K": 18}})
           for i, title in enumerate(("Nano Banana 2", "Nano Banana 2 Lite"))]
     z = ModelSpec("vilva:z", "vilva", "image", "Z Image", "z", base_units=2)
-    h = Harness(tmp_path, models=list(MOCK_MODELS) + nb + [z])
+    # та же модель у другого провайдера дороже — должна скрыться
+    nb_dup = ModelSpec("mage:nb", "mage", "image", "Nano Banana 2", "nb", base_units=600)
+    h = Harness(tmp_path, models=list(MOCK_MODELS) + nb + [z, nb_dup])
     h.db.ensure_user(42, "u", 500)
     h.feed(h.msg(BTN_IMAGE), h.cb("sm:image:k"))
-    provs = [b.text for b in buttons(last_markup(h))]
-    assert any(t.startswith("Vilva · 3 мод.") for t in provs)
-    vilva_cb = next(b.callback_data for b in buttons(last_markup(h)) if b.text.startswith("Vilva"))
-    h.feed(h.cb(vilva_cb))
+    all_text = " ".join(b.text for b in buttons(last_markup(h))) + " ".join(h.session.texts())
+    assert "Vilva" not in all_text and "Mage" not in all_text
     fams = {b.text.split(" ·")[0]: b.callback_data for b in buttons(last_markup(h)) if b.callback_data.startswith("mm:")}
-    assert set(fams) == {"Nano Banana", "Z Image"}
+    assert {"Nano Banana", "Z Image"} <= set(fams)
     # семейство с одной моделью выбирается сразу и возвращает на панель
     h.feed(h.cb(fams["Z Image"]))
     assert h.db.get_settings(42)["image_model"] == "vilva:z"
-    assert buttons(last_markup(h))[0].text.startswith("🧠 Vilva · Z Image")
-    # семейство из двух — список с номерами и диапазоном цен
-    h.feed(h.cb("sm:image:k"), h.cb(vilva_cb), h.cb(fams["Nano Banana"]))
+    assert buttons(last_markup(h))[0].text == "🧠 Модель: Z Image"
+    # семейство из двух — список с номерами, дубль дорогого провайдера скрыт
+    h.feed(h.cb("sm:image:k"), h.cb(fams["Nano Banana"]))
     models = [b for b in buttons(last_markup(h)) if b.callback_data.startswith("pm:")]
     assert [b.text.split(" ·")[0] for b in models] == ["1. Nano Banana 2", "2. Nano Banana 2 Lite"]
-    assert "–" in models[0].text   # диапазон цен 1K…2K
+    assert "–" in models[0].text
     h.feed(h.cb(models[1].callback_data))
     assert h.db.get_settings(42)["image_model"] == "vilva:nb1"
     h.db.close()
+
+
+def test_back_from_params_returns_to_panel(h):
+    h.db.ensure_user(42, "u", 500)
+    h.feed(h.msg(BTN_IMAGE), h.cb("sx:image"))
+    back = [b for b in buttons(last_markup(h)) if b.text == "« Назад"][0]
+    assert back.callback_data == "kp:image"
+    h.feed(h.cb("pp:image:aspect_ratio"))
+    back2 = [b for b in buttons(last_markup(h)) if b.text == "« Назад"][0]
+    assert back2.callback_data == "sp:image"
+
+
+def test_welcome_and_regenerate(h):
+    from aiogram.methods import SendPhoto
+
+    h.feed(h.msg("/start"))
+    first = h.session.calls[0]
+    assert isinstance(first, SendPhoto) and "Привет" in first.caption and "Mage" not in first.caption
+    h.db.grant(42, 100)
+    h.feed(h.msg("кот в очках"))
+    result = [c for c in h.session.calls if isinstance(c, SendPhoto)][-1]
+    assert "Тестовая картинка" in result.caption and result.reply_markup.inline_keyboard[0][0].callback_data == "rg:image"
+    h.feed(h.cb("rg:image"))
+    assert [c[1] for c in h.provider.calls] == ["кот в очках", "кот в очках"]

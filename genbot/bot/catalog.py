@@ -38,61 +38,167 @@ class ModelSpec:
     family: str = ""             # семейство для меню выбора (GPT Image, Seedance, Nano Banana…)
 
 
-def _mage_image(model_id: str, arch: str, title: str, grid: dict[tuple, float], note: str,
-                quality: tuple[str, ...] = ()) -> ModelSpec:
-    res = tuple(dict.fromkeys(k[0] for k in grid))
-    options = {"aspect_ratio": IMAGE_ASPECTS, "resolution": res}
-    keys: tuple[str, ...] = ("resolution",)
-    simple = {"aspect_ratio": "1:1", "resolution": res[0]}
-    if quality:
-        options["quality"] = quality
-        keys = ("resolution", "quality")
-        simple["quality"] = quality[0]
+def _durations(available: tuple[str, ...]) -> tuple[str, ...]:
+    """Короткий список длительностей для кнопок из того, что поддерживает модель."""
+    nice = ("3", "4", "5", "6", "8", "10", "12", "15", "16", "20", "25", "30")
+    picked = tuple(d for d in nice if d in available)
+    return picked or available
+
+
+def _mage_image(model_id: str, arch: str, title: str, grid, note: str, quality: tuple[str, ...] = (),
+                aspects: tuple[str, ...] = IMAGE_ASPECTS, image_field: str | None = "image",
+                family: str = "", key: str = "") -> ModelSpec:
+    """grid: число (одна цена) или {разрешение: gems} или {(разрешение, quality): gems}."""
+    options: dict[str, tuple[str, ...]] = {"aspect_ratio": aspects}
+    simple = {"aspect_ratio": "1:1" if "1:1" in aspects else aspects[0]}
+    if isinstance(grid, (int, float)):
+        keys: tuple[str, ...] = ()
+        grid = {(): float(grid)}
+    else:
+        grid = {(k if isinstance(k, tuple) else (k,)): float(v) for k, v in grid.items()}
+        res = tuple(dict.fromkeys(k[0] for k in grid))
+        options["resolution"] = res
+        simple["resolution"] = res[0]
+        keys = ("resolution",)
+        if quality:
+            options["quality"] = quality
+            keys = ("resolution", "quality")
+            simple["quality"] = quality[0]
     return ModelSpec(
-        key=f"mage:{model_id}", provider="mage", kind="image", title=title, arch=arch, model_id=model_id,
-        base_units=min(grid.values()), options=options, simple=simple, image_field="image", note=note,
-        price_keys=keys, price_grid=grid,
+        key=key or f"mage:{model_id}", provider="mage", kind="image", title=title, arch=arch, model_id=model_id,
+        base_units=min(grid.values()), options=options, simple=simple, image_field=image_field, note=note,
+        price_keys=keys, price_grid=grid, family=family,
     )
 
 
 def _mage_video(model_id: str, arch: str, title: str, rates: dict[str, float], aspects, durations,
-                image_field: str, note: str, extra: dict | None = None) -> ModelSpec:
-    options = {"aspect_ratio": aspects, "resolution": tuple(rates), "duration": durations}
+                image_field: str | None, note: str, extra: dict | None = None, family: str = "") -> ModelSpec:
+    """rates — gems в секунду по разрешению."""
+    durations = _durations(tuple(durations))
+    options = {"aspect_ratio": tuple(aspects), "resolution": tuple(rates), "duration": durations}
     if extra:
         options.update(extra)
+    simple = {"aspect_ratio": "9:16" if "9:16" in aspects else aspects[0],
+              "resolution": next(iter(rates)), "duration": "5" if "5" in durations else durations[0]}
     return ModelSpec(
         key=f"mage:{model_id}", provider="mage", kind="video", title=title, arch=arch, model_id=model_id,
-        base_units=math.ceil(rates["480p"] * 5 - 1e-9), options=options,
-        simple={"aspect_ratio": "9:16", "resolution": "480p", "duration": "5"},
-        image_field=image_field, note=note, rate_by_res=rates, family=arch.title(),
+        base_units=math.ceil(next(iter(rates.values())) * float(simple["duration"]) - 1e-9), options=options,
+        simple=simple, image_field=image_field, note=note, rate_by_res=rates, family=family or arch.title(),
     )
 
 
-# Цены сняты через estimate_cost Mage 2026-10-02 (gems). Картинки — за штуку, видео — за секунду.
-# Формат кадра, звук и голоса на цену не влияют.
+def _mage_clip(model_id: str, arch: str, title: str, prices: dict[str, float], aspects, image_field: str | None,
+               note: str, family: str) -> ModelSpec:
+    """Видео фиксированной длины: цена зависит только от разрешения."""
+    options = {"aspect_ratio": tuple(aspects), "resolution": tuple(prices)}
+    simple = {"aspect_ratio": "9:16" if "9:16" in aspects else aspects[0], "resolution": next(iter(prices))}
+    return ModelSpec(
+        key=f"mage:{model_id}", provider="mage", kind="video", title=title, arch=arch, model_id=model_id,
+        base_units=min(prices.values()), options=options, simple=simple, image_field=image_field, note=note,
+        price_keys=("resolution",), price_grid={(k,): float(v) for k, v in prices.items()}, family=family,
+    )
+
+
+GPT_GRID = {("1K", "low"): 9, ("1K", "medium"): 80, ("1K", "high"): 317,
+            ("2K", "low"): 18, ("2K", "medium"): 160, ("2K", "high"): 634}
+NANO_ASPECTS = ("1:1", "9:16", "16:9", "3:4", "4:3", "2:3", "3:2", "4:5", "5:4", "21:9", "4:1", "8:1")
+GROK_ASPECTS = ("1:1", "9:16", "16:9", "3:4", "4:3", "2:3", "3:2", "2:1", "1:2")
+V_STD = ("9:16", "16:9", "1:1", "3:4", "4:3")
+V_WIDE = ("9:16", "16:9", "1:1", "4:5", "2:3", "3:2", "21:9")
+SECONDS = tuple(str(i) for i in range(1, 31))
+
+# Все модели Mage. Цены сняты через estimate_cost 2026-10-02: картинки — gems за штуку,
+# видео — gems в секунду по разрешению (итог округляется вверх). Формат кадра на цену не влияет.
 MAGE_MODELS: tuple[ModelSpec, ...] = (
-    _mage_image("gpt-image-2.5-flare", "gpt_image_2", "GPT Image 2.5 Flare",
-                {("1K", "low"): 9, ("1K", "medium"): 80, ("1K", "high"): 317,
-                 ("2K", "low"): 18, ("2K", "medium"): 160, ("2K", "high"): 634},
-                "точно следует промпту, текст на картинке; quality сильно влияет на цену",
+    # --- картинки ---
+    _mage_image("gpt-image-2.5-flare", "gpt_image_2", "GPT Image 2.5 Flare", GPT_GRID,
+                "точно следует промпту, текст на картинке", quality=("low", "medium", "high")),
+    _mage_image("gpt-image-2.5-sunburst", "gpt_image_2", "GPT Image 2.5 Sunburst", GPT_GRID,
+                "лучший для точных правок по фото", quality=("low", "medium", "high")),
+    _mage_image("gpt-image-2", "gpt_image_2", "GPT Image 2", GPT_GRID, "генерация и правки",
                 quality=("low", "medium", "high")),
-    _mage_image("guava-2", "guava", "Guava 2", {("1K",): 36, ("2K",): 36}, "фотореализм, быстрее"),
-    _mage_image("guava-2-pro", "guava", "Guava 2 Pro", {("1K",): 48, ("2K",): 90}, "фотореализм: портреты, товары"),
-    _mage_image("mango-v3s", "mango", "Mango 3S", {("2K",): 55, ("3K",): 55}, "персонажи и референсы, до 3K"),
-    _mage_image("mango-v3", "mango", "Mango 3", {("1K",): 68, ("2K",): 135}, "флагман Mage, точные правки"),
-    _mage_image("mango-v2", "mango", "Mango 2", {("2K",): 60, ("3K",): 60, ("4K",): 60}, "единственная до 4K"),
-    _mage_video("lemon", "lemon", "Lemon", {"480p": 81.6, "720p": 168, "1080p": 336},
-                ("9:16", "16:9", "1:1", "3:4", "4:3"), ("3", "5", "8", "10", "15", "20", "30"), "first_image",
-                "баланс цены и качества, со звуком, оживляет фото", {"audio": ("true", "false")}),
-    _mage_video("cherry-mini", "cherry", "Cherry Mini", {"480p": 60, "720p": 120},
-                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15"), "image", "самое дешёвое видео"),
-    _mage_video("cherry", "cherry", "Cherry", {"480p": 90, "720p": 180},
-                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15"), "image", "кино-движение дешевле флагмана"),
+    _mage_image("nano-banana-v2", "nano_banana_v2", "Nano Banana 2",
+                {"512": 68, "1K": 101, "2K": 152, "4K": 227}, "читаемый текст, до 14 референсов, до 4K",
+                aspects=NANO_ASPECTS),
+    _mage_image("mango-v3-turbo", "mango", "Mango 3 Turbo", {"1K": 27, "2K": 27}, "быстрый и дешёвый, сильный текст"),
+    _mage_image("mango-v3", "mango", "Mango 3", {"1K": 68, "2K": 135}, "флагман: персонажи, точные правки"),
+    _mage_image("mango-v3s", "mango", "Mango 3S", {"2K": 55, "3K": 55}, "персонажи и референсы, до 3K"),
+    _mage_image("mango-v2", "mango", "Mango 2", {"2K": 60, "3K": 60, "4K": 60}, "картинки до 4K"),
+    _mage_image("mango", "mango", "Mango 1", {"1K": 45, "2K": 45, "3K": 45, "4K": 45}, "классика, без референсов",
+                image_field=None),
+    _mage_image("guava-2", "guava", "Guava 2", {"1K": 36, "2K": 36}, "фотореализм, быстрее"),
+    _mage_image("guava-2-pro", "guava", "Guava 2 Pro", {"1K": 48, "2K": 90}, "фотореализм: портреты, мода, товары"),
+    _mage_image("guava-pro-v1-5", "guava", "Guava Pro 1.5", {"1K": 79, "2K": 79}, "прошлая версия"),
+    _mage_image("guava-pro", "guava", "Guava Pro", {"1K": 79, "2K": 79}, "прошлая версия"),
+    _mage_image("guava", "guava", "Guava 1", {"1K": 37, "2K": 37}, "прошлая версия"),
+    _mage_image("grok-imagine-image", "grok_image", "Grok Image", {"1k": 30, "2k": 30}, "быстрый", aspects=GROK_ASPECTS),
+    _mage_image("grok-imagine-image-quality", "grok_image", "Grok Image Quality", {"1k": 75, "2k": 105},
+                "качественнее", aspects=GROK_ASPECTS),
+    _mage_image("grok-imagine-image-2.0", "grok_image", "Grok Image 2.0", {"1k": 90, "2k": 120},
+                "новейший Grok", aspects=GROK_ASPECTS),
+    _mage_image("flux2-dev", "flux2", "Flux 2 Dev", {"1k": 40, "2k": 40}, "длинные детальные промпты, правки"),
+    _mage_image("z-image-turbo", "z_image", "Z-Image Turbo", {"1k": 10, "2k": 10}, "самый быстрый, фото и надписи",
+                image_field=None, family="Z Image"),
+    _mage_image("krea-2-turbo", "krea_2", "Krea 2 Turbo", {"1k": 20, "2k": 20}, "сильная эстетика", image_field=None),
+    _mage_image("anima-v1", "anima", "Anima v1", {"1k": 20, "2k": 20}, "аниме и иллюстрации", image_field=None),
+    _mage_image("chroma-v1-hd", "chroma", "Chroma HD", 35, "универсальная открытая модель", image_field=None),
+    _mage_image("hidream-fast", "hidream", "HiDream Fast", 20, "быстрая, фото или рисунок", image_field=None),
+    _mage_image("sd-3-5-large", "stable_diffusion_v35_large", "Stable Diffusion 3.5 Large", 10,
+                "точно следует промпту", family="Stable Diffusion"),
+    _mage_image("6A35A7855770AE9820A3C931D4964C3817B6D9E3C6F9C4DABB5B3A94E5643B80", "stable_diffusion_xl",
+                "Stable Diffusion XL", 10, "фотореализм", family="Stable Diffusion", key="mage:sdxl"),
+    _mage_image("6A35A7855770AE9820A3C931D4964C3817B6D9E3C6F9C4DABB5B3A94E5643B80", "sdxl_plus",
+                "SDXL Plus", 15, "детализация, чистка лиц и рук", family="Stable Diffusion", key="mage:sdxl-plus"),
+    _mage_image("15012C538F503CE2EBFC2C8547B268C75CCDAFF7A281DB55399940FF1D70E21D", "stable_diffusion_v15",
+                "Stable Diffusion 1.5", 10, "классика", family="Stable Diffusion", key="mage:sd15"),
+    # --- видео ---
+    _mage_video("lemon", "lemon", "Lemon", {"480p": 81.6, "720p": 168, "1080p": 336}, V_STD, SECONDS[1:],
+                "first_image", "баланс цены и качества, со звуком, оживляет фото", {"audio": ("true", "false")}),
+    _mage_video("cherry-mini", "cherry", "Cherry Mini", {"480p": 60, "720p": 120}, ("9:16", "16:9", "1:1"),
+                ("4", "5", "8", "10", "15"), "image", "самое дешёвое кино-видео"),
+    _mage_video("cherry", "cherry", "Cherry", {"480p": 90, "720p": 180}, ("9:16", "16:9", "1:1"),
+                ("4", "5", "8", "10", "15"), "image", "кино-движение и звук"),
     _mage_video("cherry-pro", "cherry", "Cherry Pro", {"480p": 105, "720p": 225, "1080p": 555, "4k": 1170},
-                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15"), "image", "единственная до 4K"),
+                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15"), "image", "до 4K"),
     _mage_video("cherry-2-pro", "cherry", "Cherry 2 Pro", {"480p": 154.5, "720p": 346.5, "1080p": 853.5},
-                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15", "20", "30"), "image",
+                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15", "20", "25", "30"), "image",
                 "флагман, до 30 сек"),
+    _mage_video("berry-2", "berry", "Berry 2", {"480p": 63, "720p": 126, "1080p": 162},
+                ("9:16", "16:9", "1:1", "3:4", "4:3", "4:5", "5:4"), SECONDS[2:15], "first_image",
+                "точно держит референсы"),
+    _mage_video("berry", "berry", "Berry 1", {"720p": 147, "1080p": 252},
+                ("9:16", "16:9", "1:1", "3:4", "4:3", "4:5", "5:4"), SECONDS[2:15], "first_image", "прошлая версия"),
+    _mage_video("blueberry-v2", "blueberry", "Blueberry 2", {"720p": 90, "1080p": 135}, V_STD, SECONDS[1:15],
+                "first_image", "движение между первым и последним кадром, со звуком", {"audio": ("true", "false")}),
+    _mage_video("blueberry", "blueberry", "Blueberry 1", {"720p": 105, "1080p": 159}, V_STD, SECONDS[1:15],
+                "first_image", "прошлая версия", {"audio": ("true", "false")}),
+    _mage_video("raspberry", "raspberry", "Raspberry", {"720p": 90, "1080p": 135}, V_STD, SECONDS[1:15],
+                "first_image", "персонажи с голосом и звуком"),
+    _mage_video("kiwi", "kiwi", "Kiwi", {"480p": 54, "720p": 105, "1080p": 159}, V_STD, ("5", "10"),
+                "first_image", "простое видео из текста или фото"),
+    _mage_video("melon", "melon", "Melon", {"540p": 36.8, "720p": 57.8, "1080p": 68.4}, V_STD,
+                ("3", "4", "5", "6", "8", "10", "16"), "first_image", "аниме-видео"),
+    _mage_video("melon-pro", "melon", "Melon Pro", {"540p": 47.4, "720p": 105, "1080p": 126}, V_STD,
+                ("3", "4", "5", "6", "8", "10", "16"), "first_image", "аниме-видео, качественнее"),
+    _mage_video("grok-imagine-video", "grok_video", "Grok Video", {"480p": 75, "720p": 105},
+                ("9:16", "16:9", "1:1", "3:4", "4:3", "2:3", "3:2"), SECONDS[:15], "image", "видео от xAI",
+                family="Grok"),
+    _mage_video("minimax-h3-turbo", "minimax_h3", "MiniMax H3 Turbo", {"480p": 6, "544p": 7, "720p": 12, "768p": 15},
+                V_WIDE, SECONDS[4:15], "first_image", "очень дёшево, видео со звуком", family="MiniMax"),
+    _mage_video("minimax-h3", "minimax_h3", "MiniMax H3", {"480p": 18, "544p": 25, "720p": 54, "768p": 66},
+                V_WIDE, ("5", "6", "7", "8"), "first_image", "видео со стереозвуком", family="MiniMax"),
+    _mage_video("plum-max", "plum", "Plum Max", {"480P": 67.5, "768P": 108},
+                ("9:16", "16:9", "1:1", "3:4", "4:3", "21:9"), SECONDS[4:15], "first_image", "звук в каждом ролике"),
+    _mage_video("plum", "plum", "Plum", {"768P": 108, "2K": 156}, ("9:16", "16:9", "1:1", "3:4", "4:3", "21:9"),
+                SECONDS[3:15], "first_image", "звук, до 2K"),
+    _mage_clip("wan22-video", "wan_22", "Wan 2.2", {"240p": 40, "360p": 90, "480p": 165, "720p": 495}, V_WIDE,
+               "first_image", "открытая модель, ролик ~5 сек", "Wan"),
+    _mage_clip("wan22-video-lightning", "wan_22", "Wan 2.2 Lightning", {"240p": 35, "360p": 75, "480p": 140,
+               "720p": 415}, V_WIDE, "first_image", "быстрее", "Wan"),
+    _mage_clip("ltx-video-096-distilled", "ltx_video", "LTX Video Distilled", {"240p": 10, "360p": 15, "480p": 20,
+               "720p": 25}, V_WIDE, "first_image", "самое дешёвое видео для черновиков", "LTX"),
+    _mage_clip("ltx-video-096-dev", "ltx_video", "LTX Video Dev", {"240p": 10, "360p": 15, "480p": 20, "720p": 25},
+               V_WIDE, "first_image", "черновики", "LTX"),
 )
 
 MOCK_MODELS: tuple[ModelSpec, ...] = (
@@ -107,7 +213,8 @@ MOCK_MODELS: tuple[ModelSpec, ...] = (
 KNOWN_FAMILIES = (
     "Nano Banana", "GPT Image", "GPT-4o Image", "Seedance", "Seedream", "Flux", "Qwen Image", "Z Image",
     "Grok Imagine", "Midjourney", "Kling AI Avatar", "Kling", "Veo", "Hailuo", "Wan", "Sora", "Ideogram", "Recraft",
-    "Mango", "Guava", "Lemon", "Cherry",
+    "Mango", "Guava", "Lemon", "Cherry", "Berry", "Blueberry", "Raspberry", "Kiwi", "Melon", "Plum", "MiniMax",
+    "Krea", "Anima", "Chroma", "HiDream", "Stable Diffusion", "SDXL", "LTX",
 )
 PRICE_PARAMS = ("resolution", "quality", "effort", "duration")
 
