@@ -272,7 +272,7 @@ class VilvaProvider:
                 vals = item.get(key + "s") or item.get(_camel(key) + "s")
                 if isinstance(vals, list) and vals:
                     options[key] = tuple(str(v) for v in vals)
-            base, table, per_second = _parse_credits(item)
+            base, table, per_second, rate_by_res = _parse_credits(item)
             simple = {}
             if "aspect_ratio" in options:
                 simple["aspect_ratio"] = next(
@@ -290,7 +290,7 @@ class VilvaProvider:
                 base_units=base or 1.0, options=options, simple=simple,
                 image_field="image" if accepts or kind == "video" else None,
                 note=str(item.get("description") or "")[:80],
-                price_table=table, per_second=per_second,
+                price_table=table, per_second=per_second, rate_by_res=rate_by_res,
             ))
         return specs
 
@@ -550,29 +550,32 @@ def _snake(s: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
 
 
-def _parse_credits(item: dict) -> tuple[float, dict[str, dict[str, float]], float]:
-    """credits: число или {"base": 12, "perResolution": {"1K": 12}, "perSecond": 3}."""
+def _parse_credits(item: dict) -> tuple[float, dict[str, dict[str, float]], float, dict[str, float]]:
+    """credits: число или {"base": 12, "perResolution": {"1K": 12}, "perSecond": 3 | {"720p": 10}}."""
     raw = None
     for k in ("credits", "cost", "price", "creditCost", "costCredits"):
         if item.get(k) is not None:
             raw = item[k]
             break
     if isinstance(raw, (int, float)):
-        return float(raw), {}, 0.0
+        return float(raw), {}, 0.0, {}
     if not isinstance(raw, dict):
-        return 0.0, {}, 0.0
+        return 0.0, {}, 0.0, {}
     table: dict[str, dict[str, float]] = {}
     per_second = 0.0
+    rate_by_res: dict[str, float] = {}
     for k, v in raw.items():
-        if k in ("perSecond", "per_second") and isinstance(v, (int, float)):
+        if k in ("perSecond", "per_second", "perSec") and isinstance(v, (int, float)):
             per_second = float(v)
+        elif k in ("perSecond", "per_second", "perSec", "perSecondByResolution") and isinstance(v, dict):
+            rate_by_res = {str(a): float(b) for a, b in v.items() if isinstance(b, (int, float))}
         elif k.startswith("per") and isinstance(v, dict):
             name = _snake(k[3:].lstrip("_"))
             table[name] = {str(a): float(b) for a, b in v.items() if isinstance(b, (int, float))}
     base = raw.get("base")
     if not isinstance(base, (int, float)):
         base = min((min(t.values()) for t in table.values() if t), default=0.0)
-    return float(base), table, per_second
+    return float(base), table, per_second, rate_by_res
 
 
 def _model_kind(item: dict) -> str:

@@ -136,3 +136,9 @@ def test_admin_give_credits(h):
     assert any("Начислил 50" in t for t in h.session.texts())
     h.feed(h.msg("/give 1000", uid=42))  # не админ
     assert h.db.balance(42) == 0
+
+
+def test_admin_prices_audit(h):
+    h.feed(h.msg("/prices", uid=1))
+    text = "\n".join(h.session.texts())
+    assert "Курсы:" in text and "Тестовая картинка" in text and "→" in text

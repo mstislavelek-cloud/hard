@@ -524,6 +524,30 @@ async def cmd_give(message: Message, command: CommandObject, bot: Bot, app: App)
             pass
 
 
+async def cmd_prices(message: Message, app: App) -> None:
+    """Аудит цен: себестоимость и цена для пользователя по каждой модели при базовых и максимальных параметрах."""
+    if message.from_user.id not in app.cfg.admin_ids:
+        return
+    lines = [f"Курсы: gem ${app.cfg.mage_usd_per_gem}, кредит Vilva ${app.cfg.vilva_usd_per_credit:.5f}, "
+             f"кредит бота ${app.cfg.credit_usd}, наценка ×{app.cfg.markup}\n"]
+    for kind in ("image", "video"):
+        lines.append("🖼 Картинки" if kind == "image" else "\n🎬 Видео")
+        for m in sorted_models(app, kind):
+            base = {k: v for k, v in m.simple.items() if k in m.options}
+            top = {k: v[-1] for k, v in m.options.items() if k in ("resolution", "duration", "quality")}
+            unit = "gems" if m.provider == "mage" else "кр Vilva"
+            for label, params in (("база", base), ("макс", {**base, **top})):
+                u = app.catalog.estimate_units(m, params)
+                usd = app.catalog.usd(m.provider, u)
+                lines.append(f"{provider_tag(m)} · {m.title} [{label}: {describe_params(m, params)}] — {u:g} {unit} "
+                             f"= ${usd:.3f} → {app.catalog.credits(m, u)} кр")
+                if params == {**base, **top}:
+                    break
+    text = "\n".join(lines)
+    for i in range(0, len(text), 3800):
+        await message.answer(text[i:i + 3800])
+
+
 async def cmd_refund(message: Message, command: CommandObject, bot: Bot, app: App) -> None:
     if message.from_user.id not in app.cfg.admin_ids:
         return
@@ -1420,6 +1444,7 @@ def create_router() -> Router:
     r.message.register(cmd_stats, Command("stats"))
     r.message.register(cmd_refund, Command("refund"))
     r.message.register(cmd_give, Command("give"))
+    r.message.register(cmd_prices, Command("prices"))
     r.message.register(on_payment, F.successful_payment)
     r.message.register(on_photo, F.photo)
     r.message.register(cmd_video, Command("video"))

@@ -540,3 +540,20 @@ def test_budget_exceeded_auto_stop_then_collect_assets(h):
     assert any(isinstance(c, SendVideo) for c in h.session.calls)
     # использовано 28 × 2 = 56, но больше резерва (50) не списываем
     assert h.db.balance(42) == 500 - 50
+
+
+def test_vilva_per_second_by_resolution():
+    from bot.catalog import Catalog
+    from bot.config import Config
+    from bot.providers.vilva import _parse_credits
+
+    base, table, per_sec, rates = _parse_credits({"credits": {"base": 100, "perSecond": {"720p": 20, "1080p": 40}}})
+    assert rates == {"720p": 20.0, "1080p": 40.0} and base == 100
+    from bot.catalog import ModelSpec
+
+    spec = ModelSpec("vilva:v", "vilva", "video", "V", "v", base_units=base, rate_by_res=rates,
+                     options={"resolution": ("720p", "1080p"), "duration": ("5", "10")},
+                     simple={"resolution": "720p", "duration": "5"})
+    cat = Catalog(Config(bot_token="x"), [spec])
+    assert cat.estimate_units(spec, {"resolution": "1080p", "duration": "10"}) == 400
+    assert cat.estimate_units(spec, {}) == 100

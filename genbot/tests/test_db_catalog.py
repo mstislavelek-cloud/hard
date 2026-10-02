@@ -87,18 +87,51 @@ def test_settings_column_migration(tmp_path):
 
 # --- каталог и цены ---
 
-def test_price_scales_with_duration_and_resolution():
-    # реальные курсы: 10 000 gems = $10, 1 кр бота ≈ $0.0665, наценка ×2
-    cfg = Config(bot_token="x", mage_key="k")
-    cat = Catalog(cfg, list(MAGE_MODELS))
-    lemon = cat.get("mage:lemon")
-    base = cat.price(lemon, {"duration": "3", "resolution": "480p"})
-    assert base == 8  # 245 gems = $0.245 → ×2 / 0.0665 = 7.4
-    assert cat.price(lemon, {"duration": "6", "resolution": "480p"}) == 15
-    assert cat.price(lemon, {"duration": "3", "resolution": "1080p"}) > base * 3
+# Цены Mage, снятые через их estimate_cost (gems): (модель, параметры, ожидаемые gems)
+MAGE_ESTIMATES = [
+    ("mage:gpt-image-2.5-flare", {"resolution": "1K", "quality": "low"}, 9),
+    ("mage:gpt-image-2.5-flare", {"resolution": "1K", "quality": "medium"}, 80),
+    ("mage:gpt-image-2.5-flare", {"resolution": "1K", "quality": "high"}, 317),
+    ("mage:gpt-image-2.5-flare", {"resolution": "2K", "quality": "medium"}, 160),
+    ("mage:gpt-image-2.5-flare", {"resolution": "2K", "quality": "high"}, 634),
+    ("mage:guava-2", {"resolution": "2K"}, 36),
+    ("mage:guava-2-pro", {"resolution": "1K"}, 48),
+    ("mage:guava-2-pro", {"resolution": "2K"}, 90),
+    ("mage:mango-v3", {"resolution": "1K"}, 68),
+    ("mage:mango-v3", {"resolution": "2K"}, 135),
+    ("mage:mango-v3s", {"resolution": "3K"}, 55),
+    ("mage:mango-v2", {"resolution": "4K"}, 60),
+    ("mage:lemon", {"resolution": "480p", "duration": "3"}, 245),
+    ("mage:lemon", {"resolution": "480p", "duration": "5"}, 408),
+    ("mage:lemon", {"resolution": "480p", "duration": "10"}, 816),
+    ("mage:lemon", {"resolution": "720p", "duration": "5"}, 840),
+    ("mage:lemon", {"resolution": "1080p", "duration": "5"}, 1680),
+    ("mage:cherry-mini", {"resolution": "480p", "duration": "10"}, 600),
+    ("mage:cherry-mini", {"resolution": "720p", "duration": "5"}, 600),
+    ("mage:cherry", {"resolution": "720p", "duration": "5"}, 900),
+    ("mage:cherry-pro", {"resolution": "1080p", "duration": "5"}, 2775),
+    ("mage:cherry-pro", {"resolution": "4k", "duration": "5"}, 5850),
+    ("mage:cherry-2-pro", {"resolution": "480p", "duration": "5"}, 773),
+    ("mage:cherry-2-pro", {"resolution": "720p", "duration": "10"}, 3465),
+    ("mage:cherry-2-pro", {"resolution": "1080p", "duration": "10"}, 8535),
+]
+
+
+@pytest.mark.parametrize("key,params,gems", MAGE_ESTIMATES)
+def test_mage_prices_match_estimate_cost(key, params, gems):
+    cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
+    assert cat.estimate_units(cat.get(key), params) == gems
+
+
+def test_mage_credit_prices():
+    # 10 000 gems = $10, 1 кр бота ≈ $0.0665, наценка ×2
+    cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
     flare = cat.get("mage:gpt-image-2.5-flare")
-    assert cat.price(flare, {"resolution": "1K"}) == 1
-    assert cat.price(flare, {"resolution": "1K", "quality": "high"}) == 5
+    assert cat.price(flare, {"resolution": "1K", "quality": "low"}) == 1
+    assert cat.price(flare, {"resolution": "2K", "quality": "high"}) == 20   # 634 gems = $0.634
+    lemon = cat.get("mage:lemon")
+    assert cat.price(lemon, {"resolution": "480p", "duration": "5"}) == 13
+    assert cat.price(lemon, {"resolution": "1080p", "duration": "5"}) == 51
     assert cat.default("image").key == "mage:gpt-image-2.5-flare"
     assert cat.default("video").key == "mage:lemon"
 

@@ -24,13 +24,19 @@ async def check_vilva(url: str, key: str) -> None:
             print(f"  - {name}: {json.dumps(schema.get('properties', {}), ensure_ascii=False)[:400]}")
         for name in ("get_credit_balance", "list_models"):
             try:
-                print(f"vilva {name}: {_text(await client.call_tool(name, {}))[:3000]}")
+                text = _text(await client.call_tool(name, {}))
+                print(f"vilva {name}: {text[:1500]}{' …' if len(text) > 1500 else ''}")
+                if name == "list_models":
+                    with open("vilva_models.json", "w", encoding="utf-8") as f:
+                        f.write(text)
+                    print("vilva: полный список моделей сохранён в vilva_models.json")
             except Exception as e:
                 print(f"vilva {name}: ошибка {e}")
         specs = await VilvaProvider(client=client).discover_models()
         print("vilva: модели в боте:")
         for s in specs:
-            print(f"  - {s.kind} {s.key} «{s.title}» {s.base_units} кр, параметры {s.options}")
+            print(f"  - {s.kind} {s.key} «{s.title}» база {s.base_units}, таблицы {s.price_table}, "
+                  f"за сек {s.per_second or s.rate_by_res}, параметры {s.options}")
     finally:
         await client.close()
 

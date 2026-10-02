@@ -7,8 +7,7 @@ from dataclasses import dataclass, field
 from .config import Config
 
 IMAGE_ASPECTS = ("1:1", "4:5", "2:3", "9:16", "16:9", "3:2", "5:4", "21:9", "9:21")
-# Оценка: каждый следующий уровень quality у GPT Image в несколько раз дороже (точная цена — по факту списания).
-QUALITY_SCALE = {"low": 1.0, "medium": 4.0, "high": 16.0}
+# Запасная оценка, если у модели нет точной сетки цен.
 RES_SCALE = {"1K": 1.0, "2K": 2.0, "3K": 3.0, "4K": 4.0,
              "480p": 1.0, "720p": 2.25, "1080p": 4.0, "4k": 9.0}
 
@@ -31,50 +30,67 @@ class ModelSpec:
     price_table: dict[str, dict[str, float]] = field(default_factory=dict)
     # Цена за секунду видео (если провайдер считает так).
     per_second: float = 0.0
+    # Точная сетка цен: ключ — значения параметров price_keys по порядку, например ("1K", "high") → 317.
+    price_keys: tuple[str, ...] = ()
+    price_grid: dict[tuple, float] = field(default_factory=dict)
+    # Цена за секунду по разрешению: {"480p": 81.6, "720p": 168}.
+    rate_by_res: dict[str, float] = field(default_factory=dict)
 
 
-def _mage_image(model_id: str, arch: str, title: str, gems: float, res: tuple[str, ...], note: str,
-                extra: dict | None = None) -> ModelSpec:
+def _mage_image(model_id: str, arch: str, title: str, grid: dict[tuple, float], note: str,
+                quality: tuple[str, ...] = ()) -> ModelSpec:
+    res = tuple(dict.fromkeys(k[0] for k in grid))
+    options = {"aspect_ratio": IMAGE_ASPECTS, "resolution": res}
+    keys: tuple[str, ...] = ("resolution",)
+    simple = {"aspect_ratio": "1:1", "resolution": res[0]}
+    if quality:
+        options["quality"] = quality
+        keys = ("resolution", "quality")
+        simple["quality"] = quality[0]
     return ModelSpec(
         key=f"mage:{model_id}", provider="mage", kind="image", title=title, arch=arch, model_id=model_id,
-        base_units=gems, options={"aspect_ratio": IMAGE_ASPECTS, "resolution": res, **(extra or {})},
-        base={"resolution": res[0]}, simple={"aspect_ratio": "1:1", "resolution": res[0]},
-        image_field="image", note=note,
+        base_units=min(grid.values()), options=options, simple=simple, image_field="image", note=note,
+        price_keys=keys, price_grid=grid,
     )
 
 
-def _mage_video(model_id: str, arch: str, title: str, gems: float, aspects, res, durations,
-                base_duration: str, image_field: str, note: str, extra: dict | None = None) -> ModelSpec:
-    options = {"aspect_ratio": aspects, "resolution": res, "duration": durations}
+def _mage_video(model_id: str, arch: str, title: str, rates: dict[str, float], aspects, durations,
+                image_field: str, note: str, extra: dict | None = None) -> ModelSpec:
+    options = {"aspect_ratio": aspects, "resolution": tuple(rates), "duration": durations}
     if extra:
         options.update(extra)
     return ModelSpec(
         key=f"mage:{model_id}", provider="mage", kind="video", title=title, arch=arch, model_id=model_id,
-        base_units=gems, options=options, base={"resolution": "480p", "duration": base_duration},
+        base_units=math.ceil(rates["480p"] * 5 - 1e-9), options=options,
         simple={"aspect_ratio": "9:16", "resolution": "480p", "duration": "5"},
-        image_field=image_field, note=note,
+        image_field=image_field, note=note, rate_by_res=rates,
     )
 
 
-# Цены в gems при базовых параметрах взяты из каталога Mage (list_models), 2026-10.
+# Цены сняты через estimate_cost Mage 2026-10-02 (gems). Картинки — за штуку, видео — за секунду.
+# Формат кадра, звук и голоса на цену не влияют.
 MAGE_MODELS: tuple[ModelSpec, ...] = (
-    _mage_image("gpt-image-2.5-flare", "gpt_image_2", "GPT Image 2.5 Flare", 9, ("1K", "2K"),
-                "дёшево, точно следует промпту, умеет текст на картинке",
-                {"quality": ("low", "medium", "high")}),
-    _mage_image("guava-2", "guava", "Guava 2", 36, ("1K", "2K"), "фотореализм, быстрее"),
-    _mage_image("guava-2-pro", "guava", "Guava 2 Pro", 48, ("1K", "2K"), "фотореализм: портреты, товары"),
-    _mage_image("mango-v3s", "mango", "Mango 3S", 55, ("2K", "3K"), "персонажи и референсы, до 3K"),
-    _mage_image("mango-v3", "mango", "Mango 3", 135, ("1K", "2K"), "флагман Mage, точные правки"),
-    _mage_image("mango-v2", "mango", "Mango 2", 60, ("2K", "3K", "4K"), "единственная до 4K"),
-    _mage_video("lemon", "lemon", "Lemon", 245, ("9:16", "16:9", "1:1", "3:4", "4:3"),
-                ("480p", "720p", "1080p"), ("3", "5", "8", "10", "15", "20", "30"), "3", "first_image",
+    _mage_image("gpt-image-2.5-flare", "gpt_image_2", "GPT Image 2.5 Flare",
+                {("1K", "low"): 9, ("1K", "medium"): 80, ("1K", "high"): 317,
+                 ("2K", "low"): 18, ("2K", "medium"): 160, ("2K", "high"): 634},
+                "точно следует промпту, текст на картинке; quality сильно влияет на цену",
+                quality=("low", "medium", "high")),
+    _mage_image("guava-2", "guava", "Guava 2", {("1K",): 36, ("2K",): 36}, "фотореализм, быстрее"),
+    _mage_image("guava-2-pro", "guava", "Guava 2 Pro", {("1K",): 48, ("2K",): 90}, "фотореализм: портреты, товары"),
+    _mage_image("mango-v3s", "mango", "Mango 3S", {("2K",): 55, ("3K",): 55}, "персонажи и референсы, до 3K"),
+    _mage_image("mango-v3", "mango", "Mango 3", {("1K",): 68, ("2K",): 135}, "флагман Mage, точные правки"),
+    _mage_image("mango-v2", "mango", "Mango 2", {("2K",): 60, ("3K",): 60, ("4K",): 60}, "единственная до 4K"),
+    _mage_video("lemon", "lemon", "Lemon", {"480p": 81.6, "720p": 168, "1080p": 336},
+                ("9:16", "16:9", "1:1", "3:4", "4:3"), ("3", "5", "8", "10", "15", "20", "30"), "first_image",
                 "баланс цены и качества, со звуком, оживляет фото", {"audio": ("true", "false")}),
-    _mage_video("cherry-mini", "cherry", "Cherry Mini", 240, ("9:16", "16:9", "1:1"),
-                ("480p", "720p"), ("4", "5", "8", "10", "15"), "4", "image", "самое дешёвое видео"),
-    _mage_video("cherry", "cherry", "Cherry", 360, ("9:16", "16:9", "1:1"),
-                ("480p", "720p"), ("4", "5", "8", "10", "15"), "4", "image", "кино-движение дешевле флагмана"),
-    _mage_video("cherry-2-pro", "cherry", "Cherry 2 Pro", 618, ("9:16", "16:9", "1:1"),
-                ("480p", "720p", "1080p"), ("4", "5", "8", "10", "15", "20", "30"), "4", "image",
+    _mage_video("cherry-mini", "cherry", "Cherry Mini", {"480p": 60, "720p": 120},
+                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15"), "image", "самое дешёвое видео"),
+    _mage_video("cherry", "cherry", "Cherry", {"480p": 90, "720p": 180},
+                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15"), "image", "кино-движение дешевле флагмана"),
+    _mage_video("cherry-pro", "cherry", "Cherry Pro", {"480p": 105, "720p": 225, "1080p": 555, "4k": 1170},
+                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15"), "image", "единственная до 4K"),
+    _mage_video("cherry-2-pro", "cherry", "Cherry 2 Pro", {"480p": 154.5, "720p": 346.5, "1080p": 853.5},
+                ("9:16", "16:9", "1:1"), ("4", "5", "8", "10", "15", "20", "30"), "image",
                 "флагман, до 30 сек"),
 )
 
@@ -109,7 +125,19 @@ class Catalog:
     # --- цены ---
 
     def estimate_units(self, spec: ModelSpec, params: dict[str, str]) -> float:
-        """Оценка стоимости у провайдера с учётом длительности и разрешения."""
+        """Стоимость у провайдера (gems / кредиты Vilva) при выбранных параметрах."""
+        p = {**spec.simple, **params}
+        if spec.rate_by_res:
+            rate = spec.rate_by_res.get(p.get("resolution", ""), next(iter(spec.rate_by_res.values())))
+            try:
+                return float(math.ceil(rate * float(p.get("duration", 5)) - 1e-9))
+            except ValueError:
+                return float(spec.base_units)
+        if spec.price_grid:
+            key = tuple(p.get(k) for k in spec.price_keys)
+            if key in spec.price_grid:
+                return float(spec.price_grid[key])
+            return float(max(spec.price_grid.values()))  # неизвестная комбинация — берём дорогую, не в минус
         units = spec.base_units
         for name, table in spec.price_table.items():
             if params.get(name) in table:
@@ -120,8 +148,6 @@ class Catalog:
                 return spec.per_second * float(params["duration"]) * scale
             except ValueError:
                 return units
-        if "quality" in params:
-            units *= QUALITY_SCALE.get(params["quality"], 1.0)
         if spec.price_table:
             return units
         if "duration" in params and "duration" in spec.base:
