@@ -63,11 +63,24 @@ def test_pick_model_and_advanced_params(h):
         h.app.catalog.get("mock:video"), {"duration": "5"})
 
 
-def test_simple_mode_ignores_saved_params(h):
+def test_simple_mode_keeps_quick_params_ignores_advanced(h):
     h.db.ensure_user(42, "u", 500)
-    h.db.save_settings(42, {"advanced": False, "params": {"mock:video": {"duration": "10"}}, "kind": "video"})
+    h.db.save_settings(42, {"advanced": False, "kind": "video",
+                            "params": {"mock:video": {"duration": "10", "seed": "7"}}})
     h.feed(h.msg("волны"))
-    assert h.provider.calls[-1][2] == {"duration": "5"}
+    assert h.provider.calls[-1][2] == {"duration": "10"}   # длительность — быстрый параметр, seed — продвинутый
+
+
+def test_kind_panel_has_model_and_quick_params(h):
+    h.db.ensure_user(42, "u", 500)
+    h.feed(h.msg(BTN_IMAGE))
+    texts = [b.text for b in buttons(last_markup(h))]
+    assert texts[0].startswith("🧠") and any(t.startswith("📐") for t in texts)
+    # формат прямо из панели, без продвинутого режима
+    h.feed(h.cb("pp:image:aspect_ratio:k"), h.cb("pv:image:aspect_ratio:1:k"))
+    h.feed(h.msg("кот"))
+    assert h.provider.calls[-1][2] == {"aspect_ratio": "9:16"}
+    assert any(t.startswith("🧠") for t in (b.text for b in buttons(last_markup(h))))
 
 
 def test_photo_with_caption_animates_in_video_mode(h):

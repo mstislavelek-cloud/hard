@@ -7,7 +7,7 @@ import json
 from aiogram.methods import SendMessage, SendPhoto, SendVideo
 from aiohttp import web
 
-from bot.handlers import BTN_AGENT
+from bot.handlers import BTN_AGENT, BTN_STOP_AGENT
 from bot.providers.vilva import AgentState, McpClient, VilvaProvider, _parse_sse, build_args
 from tests.conftest import serve, sse
 
@@ -242,7 +242,8 @@ def test_agent_cancel_refunds(h):
         _agent_harness(h, base)
         await h.afeed(h.msg("/agent видео"), h.cb("am:autopilot"), h.cb("ab:0"))
         start = next(c for c in h.session.calls if isinstance(c, SendMessage) and "Агент запущен" in c.text)
-        await h.afeed(h.cb(start.reply_markup.inline_keyboard[0][0].callback_data))
+        assert start.reply_markup.keyboard[0][0].text == BTN_STOP_AGENT
+        await h.afeed(h.msg(BTN_STOP_AGENT))
         await h.drain()
         await h.app.vilva.close()
 
@@ -283,7 +284,7 @@ def test_parse_real_list_models_format():
     by = {s.key: s for s in specs}
     nb = by["vilva:nano-banana-2"]
     assert nb.title == "Nano Banana 2" and nb.image_field == "image" and nb.simple["aspect_ratio"] == "1:1"
-    cat = Catalog(Config(bot_token="x", vilva_credits_per_credit=1, markup=2), specs)
+    cat = Catalog(Config(bot_token="x", vilva_usd_per_credit=1.0, credit_usd=1.0, markup=2), specs)
     assert cat.estimate_units(nb, {"resolution": "4K"}) == 27
     assert cat.price(nb, {"resolution": "1K"}) == 24
     kling = by["vilva:kling"]
@@ -462,8 +463,9 @@ def test_real_pause_format_ask_user(h):
     assert any(isinstance(c, SendPhoto) for c in h.session.calls)
 
 
-def test_budget_exceeded_raise_then_collect_assets(h):
-    """Живой формат: пауза run_chain/budget_exceeded → добавить кредиты → completed, ассеты дописываются позже."""
+def test_budget_exceeded_auto_stop_then_collect_assets(h):
+    """Живой формат: пауза run_chain/budget_exceeded → бот сам отвечает «стоп» (лимит не поднимаем),
+    запуск завершается, ассеты дописываются позже и приходят в чат."""
     run_id = "r-budget"
     st = {"respond": None, "stage": "pause", "asset_polls": 0}
     budget_plan = {"runId": run_id, "pending": True, "pauseTool": "run_chain", "resumeKey": "pause_b",
@@ -526,22 +528,15 @@ def test_budget_exceeded_raise_then_collect_assets(h):
     async def go(base):
         _agent_harness(h, base)
         await h.afeed(h.msg("/agent карточки"), h.cb("am:autopilot"), h.cb("ab:0"))   # бюджет 50
-        for _ in range(300):
-            ask = [c for c in h.session.calls if isinstance(c, SendMessage) and "не хватает бюджета" in c.text]
-            if ask:
-                break
-            await asyncio.sleep(0.01)
-        assert "{" not in ask[0].text   # никакого JSON
-        raise_btn = ask[0].reply_markup.inline_keyboard[0][0]
-        assert "Добавить 6 кр" in raise_btn.text   # 3 кредита Vilva × наценка 2
-        await h.afeed(h.cb(raise_btn.callback_data))
         await h.drain()
         await h.app.vilva.close()
 
     asyncio.run(serve(app, go))
-    assert st["respond"] == {"runId": run_id, "resumeKey": "pause_b", "answer": {"budget_continue": True}}
+    assert st["respond"] == {"runId": run_id, "resumeKey": "pause_b", "answer": {"budget_continue": False}}
+    assert any("упёрся в выбранный бюджет" in t for t in h.session.texts())
+    assert not any("{" in t for t in h.session.texts())   # никакого JSON в чате
     assert st["asset_polls"] >= 3
     assert any(isinstance(c, SendPhoto) for c in h.session.calls)
     assert any(isinstance(c, SendVideo) for c in h.session.calls)
-    # резерв 50 + 6 = 56, использовано 28 × 2 = 56
-    assert h.db.balance(42) == 500 - 56
+    # использовано 28 × 2 = 56, но больше резерва (50) не списываем
+    assert h.db.balance(42) == 500 - 50

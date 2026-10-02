@@ -31,10 +31,11 @@ class Config:
     mage_base_url: str = "https://api.mage.space/v1"
     vilva_key: str = ""
     vilva_url: str = "https://api.vilva.ai/mcp"
-    # Сколько gems Mage стоит один кредит бота (до наценки). 1 кредит ≈ $0.066 при пакете 100⭐/20 кр.
-    gems_per_credit: float = 6.0
-    # Сколько кредитов Vilva стоит один кредит бота (до наценки).
-    vilva_credits_per_credit: float = 1.0
+    # Себестоимость единиц провайдеров в $: Mage 10 000 gems = $10, Vilva 4 000 кредитов = $21.
+    mage_usd_per_gem: float = 0.001
+    vilva_usd_per_credit: float = 21 / 4000
+    # Сколько $ приносит 1 кредит бота: пакет 100⭐ = 20 кр, 1000⭐ ≈ $13.3 → ≈ $0.0665 за кредит.
+    credit_usd: float = 0.0665
     # Наценка поверх себестоимости.
     markup: float = 2.0
     default_image_model: str = "mage:gpt-image-2.5-flare"
@@ -92,8 +93,9 @@ def load_config() -> Config:
         mage_base_url=os.getenv("MAGE_BASE_URL", Config.mage_base_url),
         vilva_key=vilva_key,
         vilva_url=os.getenv("VILVA_MCP_URL", Config.vilva_url),
-        gems_per_credit=_float("GEMS_PER_CREDIT", Config.gems_per_credit),
-        vilva_credits_per_credit=_float("VILVA_CREDITS_PER_CREDIT", Config.vilva_credits_per_credit),
+        mage_usd_per_gem=_float("MAGE_USD_PER_GEM", Config.mage_usd_per_gem),
+        vilva_usd_per_credit=_float("VILVA_USD_PER_CREDIT", Config.vilva_usd_per_credit),
+        credit_usd=_float("CREDIT_USD", Config.credit_usd),
         markup=_float("MARKUP", Config.markup),
         default_image_model=os.getenv("DEFAULT_IMAGE_MODEL", Config.default_image_model),
         default_video_model=os.getenv("DEFAULT_VIDEO_MODEL", Config.default_video_model),

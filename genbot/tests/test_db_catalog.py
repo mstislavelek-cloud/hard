@@ -88,26 +88,30 @@ def test_settings_column_migration(tmp_path):
 # --- каталог и цены ---
 
 def test_price_scales_with_duration_and_resolution():
-    cfg = Config(bot_token="x", mage_key="k", gems_per_credit=6, markup=2)
+    # реальные курсы: 10 000 gems = $10, 1 кр бота ≈ $0.0665, наценка ×2
+    cfg = Config(bot_token="x", mage_key="k")
     cat = Catalog(cfg, list(MAGE_MODELS))
     lemon = cat.get("mage:lemon")
     base = cat.price(lemon, {"duration": "3", "resolution": "480p"})
-    assert base == 82  # 245 gems * 2 / 6
-    assert cat.price(lemon, {"duration": "6", "resolution": "480p"}) == 164
+    assert base == 8  # 245 gems = $0.245 → ×2 / 0.0665 = 7.4
+    assert cat.price(lemon, {"duration": "6", "resolution": "480p"}) == 15
     assert cat.price(lemon, {"duration": "3", "resolution": "1080p"}) > base * 3
     flare = cat.get("mage:gpt-image-2.5-flare")
-    assert cat.price(flare, {"resolution": "1K"}) == 3
+    assert cat.price(flare, {"resolution": "1K"}) == 1
+    assert cat.price(flare, {"resolution": "1K", "quality": "high"}) == 5
     assert cat.default("image").key == "mage:gpt-image-2.5-flare"
     assert cat.default("video").key == "mage:lemon"
 
 
 def test_vilva_credit_conversion():
-    cfg = Config(bot_token="x", vilva_credits_per_credit=0.5, markup=2)
-    cat = Catalog(cfg, [])
+    # реальные курсы: 4 000 кредитов Vilva = $21
+    cat = Catalog(Config(bot_token="x"), [])
     from bot.catalog import ModelSpec
 
-    spec = ModelSpec("vilva:m", "vilva", "image", "M", "m", base_units=3)
-    assert cat.price(spec, {}) == 12
+    gpt = ModelSpec("vilva:gpt", "vilva", "image", "GPT Image 2.5", "gpt", base_units=9)
+    assert cat.price(gpt, {}) == 2   # 9 × $0.00525 = $0.047 → ×2 / 0.0665 = 1.42
+    mage_gpt = ModelSpec("mage:gpt", "mage", "image", "GPT Image 2.5", "gpt", base_units=9)
+    assert cat.price(mage_gpt, {}) == 1   # 9 gems = $0.009 — у Mage та же модель дешевле
 
 
 @pytest.mark.parametrize("prompt", ["nude girl", "ПОРНО", "раздень её", "teen model"])

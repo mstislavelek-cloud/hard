@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from .config import Config
 
 IMAGE_ASPECTS = ("1:1", "4:5", "2:3", "9:16", "16:9", "3:2", "5:4", "21:9", "9:21")
+# Оценка: каждый следующий уровень quality у GPT Image в несколько раз дороже (точная цена — по факту списания).
+QUALITY_SCALE = {"low": 1.0, "medium": 4.0, "high": 16.0}
 RES_SCALE = {"1K": 1.0, "2K": 2.0, "3K": 3.0, "4K": 4.0,
              "480p": 1.0, "720p": 2.25, "1080p": 4.0, "4k": 9.0}
 
@@ -31,10 +33,11 @@ class ModelSpec:
     per_second: float = 0.0
 
 
-def _mage_image(model_id: str, arch: str, title: str, gems: float, res: tuple[str, ...], note: str) -> ModelSpec:
+def _mage_image(model_id: str, arch: str, title: str, gems: float, res: tuple[str, ...], note: str,
+                extra: dict | None = None) -> ModelSpec:
     return ModelSpec(
         key=f"mage:{model_id}", provider="mage", kind="image", title=title, arch=arch, model_id=model_id,
-        base_units=gems, options={"aspect_ratio": IMAGE_ASPECTS, "resolution": res},
+        base_units=gems, options={"aspect_ratio": IMAGE_ASPECTS, "resolution": res, **(extra or {})},
         base={"resolution": res[0]}, simple={"aspect_ratio": "1:1", "resolution": res[0]},
         image_field="image", note=note,
     )
@@ -56,7 +59,8 @@ def _mage_video(model_id: str, arch: str, title: str, gems: float, aspects, res,
 # Цены в gems при базовых параметрах взяты из каталога Mage (list_models), 2026-10.
 MAGE_MODELS: tuple[ModelSpec, ...] = (
     _mage_image("gpt-image-2.5-flare", "gpt_image_2", "GPT Image 2.5 Flare", 9, ("1K", "2K"),
-                "дёшево, точно следует промпту, умеет текст на картинке"),
+                "дёшево, точно следует промпту, умеет текст на картинке",
+                {"quality": ("low", "medium", "high")}),
     _mage_image("guava-2", "guava", "Guava 2", 36, ("1K", "2K"), "фотореализм, быстрее"),
     _mage_image("guava-2-pro", "guava", "Guava 2 Pro", 48, ("1K", "2K"), "фотореализм: портреты, товары"),
     _mage_image("mango-v3s", "mango", "Mango 3S", 55, ("2K", "3K"), "персонажи и референсы, до 3K"),
@@ -116,6 +120,8 @@ class Catalog:
                 return spec.per_second * float(params["duration"]) * scale
             except ValueError:
                 return units
+        if "quality" in params:
+            units *= QUALITY_SCALE.get(params["quality"], 1.0)
         if spec.price_table:
             return units
         if "duration" in params and "duration" in spec.base:
@@ -129,11 +135,12 @@ class Catalog:
 
     def credits(self, spec: ModelSpec, units: float) -> int:
         """Перевод стоимости у провайдера в кредиты бота с наценкой."""
-        if spec.provider == "vilva":
-            per_credit = self.cfg.vilva_credits_per_credit
-        else:
-            per_credit = self.cfg.gems_per_credit
-        return max(1, math.ceil(units * self.cfg.markup / per_credit))
+        return max(1, math.ceil(self.usd(spec.provider, units) * self.cfg.markup / self.cfg.credit_usd - 1e-9))
+
+    def usd(self, provider: str, units: float) -> float:
+        """Себестоимость в $ по ценам провайдера (mock считаем как Mage)."""
+        rate = self.cfg.vilva_usd_per_credit if provider == "vilva" else self.cfg.mage_usd_per_gem
+        return units * rate
 
     def price(self, spec: ModelSpec, params: dict[str, str]) -> int:
         return self.credits(spec, self.estimate_units(spec, params))

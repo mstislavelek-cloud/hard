@@ -41,6 +41,7 @@ BTN_VIDEO = "🎬 Видео"
 BTN_AGENT = "🤖 Агент"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_BALANCE = "💰 Баланс"
+BTN_STOP_AGENT = "⛔ Остановить агента"
 MENU_BUTTONS = {BTN_IMAGE, BTN_VIDEO, BTN_AGENT, BTN_SETTINGS, BTN_BALANCE}
 
 PARAM_LABELS = {
@@ -48,6 +49,7 @@ PARAM_LABELS = {
     "resolution": "Разрешение",
     "duration": "Длительность, сек",
     "audio": "Звук",
+    "quality": "Качество",
 }
 VALUE_LABELS = {"true": "вкл", "false": "выкл"}
 KIND_LABEL = {"image": "картинок", "video": "видео"}
@@ -95,13 +97,58 @@ def model_of(app: App, settings: dict, kind: str) -> ModelSpec | None:
     return app.catalog.get(settings.get(f"{kind}_model")) or app.catalog.default(kind)
 
 
+QUICK_PARAMS = ("aspect_ratio", "resolution", "duration")
+
+
 def params_of(app: App, settings: dict, spec: ModelSpec) -> dict[str, str]:
+    """Формат, разрешение и длительность выбираются всегда; остальное — только в продвинутом режиме."""
     params = {k: v for k, v in spec.simple.items() if k in spec.options}
-    if settings.get("advanced"):
-        for k, v in settings["params"].get(spec.key, {}).items():
+    for k, v in settings["params"].get(spec.key, {}).items():
+        if k in QUICK_PARAMS or settings.get("advanced"):
             if k == "seed" or v in spec.options.get(k, ()):
                 params[k] = v
     return params
+
+
+def sorted_models(app: App, kind: str) -> list[ModelSpec]:
+    def price(m):
+        return app.catalog.price(m, {k: v for k, v in m.simple.items() if k in m.options})
+    return sorted(app.catalog.by_kind(kind), key=lambda m: (price(m), m.provider, m.title))
+
+
+def provider_tag(m: ModelSpec) -> str:
+    return {"mage": "Mage", "vilva": "Vilva"}.get(m.provider, "тест")
+
+
+PARAM_ICONS = {"aspect_ratio": "📐", "resolution": "🔍", "duration": "⏱"}
+
+
+def kind_panel(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardMarkup | None]:
+    s = settings_of(app, user_id)
+    spec = model_of(app, s, kind)
+    if spec is None:
+        return "Модели этого типа сейчас недоступны", None
+    params = params_of(app, s, spec)
+    rows = [[InlineKeyboardButton(text=f"🧠 {provider_tag(spec)} · {spec.title}", callback_data=f"sm:{kind}:k")]]
+    quick = []
+    for name in QUICK_PARAMS:
+        if name in spec.options:
+            v = params.get(name, spec.options[name][0])
+            label = f"{v} сек" if name == "duration" else v
+            quick.append(InlineKeyboardButton(text=f"{PARAM_ICONS[name]} {label}", callback_data=f"pp:{kind}:{name}:k"))
+    if quick:
+        rows.append(quick)
+    rows.append([InlineKeyboardButton(text="🧪 Продвинутые настройки", callback_data=f"sx:{kind}")])
+    if kind == "image":
+        hint = ("Опиши картинку, например: «кроссовки на белом фоне, студийный свет». "
+                "Можно прислать фото с подписью — изменю его")
+    else:
+        hint = ("Опиши видео, например: «волны разбиваются о скалы на закате, медленный пролёт камеры». "
+                "Можно прислать фото с подписью — оживлю его")
+    text = (f"{'🖼 Картинка' if kind == 'image' else '🎬 Видео'}\n"
+            f"Модель: {provider_tag(spec)} · {spec.title} — ~{app.catalog.price(spec, params)} кр\n"
+            f"Параметры: {describe_params(spec, params)}\n\n✍️ {hint}")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def describe_params(spec: ModelSpec, params: dict[str, str]) -> str:
@@ -120,6 +167,11 @@ def main_menu(app: App) -> ReplyKeyboardMarkup:
         second.insert(0, KeyboardButton(text=BTN_AGENT))
     rows.append(second)
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def agent_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BTN_STOP_AGENT)]], resize_keyboard=True,
+                               input_field_placeholder="Агент работает…")
 
 
 def packs_keyboard(cfg: Config) -> InlineKeyboardMarkup:
@@ -151,20 +203,20 @@ def settings_view(app: App, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def models_view(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardMarkup]:
+def models_view(app: App, user_id: int, kind: str, ret: str = "s") -> tuple[str, InlineKeyboardMarkup]:
     s = settings_of(app, user_id)
     current = model_of(app, s, kind)
-    models = app.catalog.by_kind(kind)
-    lines = [f"Выбери модель {KIND_LABEL[kind]} (цена при базовых параметрах):\n"]
+    lines = [f"Выбери модель {KIND_LABEL[kind]} (цена при базовых параметрах, от дешёвых):\n"]
     rows = []
-    for i, m in enumerate(models):
+    for i, m in enumerate(sorted_models(app, kind)):
         price = app.catalog.price(m, {k: v for k, v in m.simple.items() if k in m.options})
         mark = "✅ " if current and m.key == current.key else ""
-        src = "Mage" if m.provider == "mage" else "Vilva" if m.provider == "vilva" else "тест"
-        lines.append(f"• {m.title} ({src}) — ~{price} кр. {m.note}")
-        rows.append([InlineKeyboardButton(text=f"{mark}{m.title} · ~{price} кр", callback_data=f"pm:{kind}:{i}")])
-    rows.append([InlineKeyboardButton(text="« Назад", callback_data="settings")])
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+        if m.note and len(lines) < 30:
+            lines.append(f"• {provider_tag(m)} · {m.title} — {m.note}")
+        rows.append([InlineKeyboardButton(text=f"{mark}{provider_tag(m)} · {m.title} · ~{price} кр",
+                                          callback_data=f"pm:{kind}:{i}:{ret}")])
+    rows.append([InlineKeyboardButton(text="« Назад", callback_data=f"kp:{kind}" if ret == "k" else "settings")])
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def params_view(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardMarkup]:
@@ -186,7 +238,7 @@ def params_view(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardM
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def values_view(app: App, user_id: int, kind: str, name: str) -> tuple[str, InlineKeyboardMarkup]:
+def values_view(app: App, user_id: int, kind: str, name: str, ret: str = "p") -> tuple[str, InlineKeyboardMarkup]:
     s = settings_of(app, user_id)
     spec = model_of(app, s, kind)
     current = params_of(app, s, spec).get(name)
@@ -194,13 +246,13 @@ def values_view(app: App, user_id: int, kind: str, name: str) -> tuple[str, Inli
     for i, v in enumerate(spec.options.get(name, ())):
         price = app.catalog.price(spec, {**params_of(app, s, spec), name: v})
         label = f"{'✅ ' if v == current else ''}{VALUE_LABELS.get(v, v)} · ~{price}"
-        row.append(InlineKeyboardButton(text=label, callback_data=f"pv:{kind}:{name}:{i}"))
+        row.append(InlineKeyboardButton(text=label, callback_data=f"pv:{kind}:{name}:{i}:{ret}"))
         if len(row) == 3:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="« Назад", callback_data=f"sp:{kind}")])
+    rows.append([InlineKeyboardButton(text="« Назад", callback_data=f"kp:{kind}" if ret == "k" else f"sp:{kind}")])
     return f"{PARAM_LABELS.get(name, name)} для {spec.title} (цена в кредитах):", InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -276,20 +328,8 @@ async def btn_kind(message: Message, app: App) -> None:
     s = settings_of(app, user.id)
     s["kind"] = kind
     app.db.save_settings(user.id, s)
-    spec = model_of(app, s, kind)
-    if spec is None:
-        await message.answer("Модели этого типа сейчас недоступны")
-        return
-    params = params_of(app, s, spec)
-    hint = ("Опиши картинку, например: «кроссовки на белом фоне, студийный свет». "
-            "Можно прислать фото с подписью — изменю его")
-    if kind == "video":
-        hint = ("Опиши видео, например: «волны разбиваются о скалы на закате, медленный пролёт камеры». "
-                "Можно прислать фото с подписью — оживлю его")
-    await message.answer(
-        f"Режим: {'картинки' if kind == 'image' else 'видео'}\nМодель: {spec.title} — ~{app.catalog.price(spec, params)} кр\n"
-        f"Параметры: {describe_params(spec, params)}\n\n{hint}"
-    )
+    text, kb = kind_panel(app, user.id, kind)
+    await message.answer(text, reply_markup=kb)
 
 
 # ---------- настройки: колбэки ----------
@@ -300,16 +340,40 @@ async def cb_settings(callback: CallbackQuery, app: App) -> None:
     await callback.answer()
 
 
-async def cb_models(callback: CallbackQuery, app: App) -> None:
+async def cb_kind_panel(callback: CallbackQuery, app: App) -> None:
     kind = callback.data.split(":")[1]
-    text, kb = models_view(app, callback.from_user.id, kind)
+    text, kb = kind_panel(app, callback.from_user.id, kind)
+    await safe_edit(callback, text, kb)
+    await callback.answer()
+
+
+async def cb_advanced_from_panel(callback: CallbackQuery, app: App) -> None:
+    kind = callback.data.split(":")[1]
+    uid = callback.from_user.id
+    s = settings_of(app, uid)
+    if not s["advanced"]:
+        s["advanced"] = True
+        app.db.save_settings(uid, s)
+    if model_of(app, s, kind) is None:
+        await callback.answer("Нет моделей", show_alert=True)
+        return
+    text, kb = params_view(app, uid, kind)
+    await safe_edit(callback, text, kb)
+    await callback.answer("Продвинутый режим включён")
+
+
+async def cb_models(callback: CallbackQuery, app: App) -> None:
+    parts = callback.data.split(":")
+    kind, ret = parts[1], (parts[2] if len(parts) > 2 else "s")
+    text, kb = models_view(app, callback.from_user.id, kind, ret)
     await safe_edit(callback, text, kb)
     await callback.answer()
 
 
 async def cb_pick_model(callback: CallbackQuery, app: App) -> None:
-    _, kind, idx = callback.data.split(":")
-    models = app.catalog.by_kind(kind)
+    parts = callback.data.split(":")
+    kind, idx, ret = parts[1], parts[2], (parts[3] if len(parts) > 3 else "s")
+    models = sorted_models(app, kind)
     if not idx.isdigit() or int(idx) >= len(models):
         await callback.answer("Модель не найдена", show_alert=True)
         return
@@ -318,7 +382,7 @@ async def cb_pick_model(callback: CallbackQuery, app: App) -> None:
     s = settings_of(app, uid)
     s[f"{kind}_model"] = models[int(idx)].key
     app.db.save_settings(uid, s)
-    text, kb = settings_view(app, uid)
+    text, kb = kind_panel(app, uid, kind) if ret == "k" else settings_view(app, uid)
     await safe_edit(callback, text, kb)
     await callback.answer(f"Выбрано: {models[int(idx)].title}")
 
@@ -345,14 +409,16 @@ async def cb_params(callback: CallbackQuery, app: App) -> None:
 
 
 async def cb_param_values(callback: CallbackQuery, app: App) -> None:
-    _, kind, name = callback.data.split(":", 2)
-    text, kb = values_view(app, callback.from_user.id, kind, name)
+    parts = callback.data.split(":")
+    kind, name, ret = parts[1], parts[2], (parts[3] if len(parts) > 3 else "p")
+    text, kb = values_view(app, callback.from_user.id, kind, name, ret)
     await safe_edit(callback, text, kb)
     await callback.answer()
 
 
 async def cb_set_value(callback: CallbackQuery, app: App) -> None:
-    _, kind, name, idx = callback.data.split(":")
+    parts = callback.data.split(":")
+    kind, name, idx, ret = parts[1], parts[2], parts[3], (parts[4] if len(parts) > 4 else "p")
     uid = callback.from_user.id
     s = settings_of(app, uid)
     spec = model_of(app, s, kind)
@@ -362,7 +428,7 @@ async def cb_set_value(callback: CallbackQuery, app: App) -> None:
         return
     s["params"].setdefault(spec.key, {})[name] = values[int(idx)]
     app.db.save_settings(uid, s)
-    text, kb = params_view(app, uid, kind)
+    text, kb = kind_panel(app, uid, kind) if ret == "k" else params_view(app, uid, kind)
     await safe_edit(callback, text, kb)
     await callback.answer("Сохранено")
 
@@ -630,12 +696,14 @@ async def send_media(message: Message, kind: str, media: Media) -> None:
 # ---------- агент Vilva ----------
 
 def agent_credits(app: App, vilva_units: float) -> int:
-    return max(1, math.ceil(vilva_units * app.cfg.markup / app.cfg.vilva_credits_per_credit))
+    """Кредиты Vilva → кредиты бота с наценкой."""
+    usd = vilva_units * app.cfg.vilva_usd_per_credit
+    return max(1, math.ceil(usd * app.cfg.markup / app.cfg.credit_usd - 1e-9))
 
 
 def agent_units(app: App, credits: int) -> float:
     """Бюджет в кредитах бота → бюджет в кредитах Vilva (без наценки)."""
-    return round(credits * app.cfg.vilva_credits_per_credit / app.cfg.markup, 2)
+    return math.floor(credits * app.cfg.credit_usd / (app.cfg.markup * app.cfg.vilva_usd_per_credit))
 
 
 async def cmd_agent(message: Message, command: CommandObject, app: App) -> None:
@@ -716,9 +784,9 @@ async def cb_agent_budget(callback: CallbackQuery, bot: Bot, app: App) -> None:
         await callback.message.answer("Не удалось запустить агента, кредиты вернул. Попробуй позже")
         return
     app.db.add_agent_run(run_id, uid, gen_id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⛔ Остановить", callback_data=f"ac:{gen_id}")]])
     await callback.message.answer(
-        f"🤖 Агент запущен (бюджет до {budget} кр). Сообщу, когда будет план, вопрос или результат", reply_markup=kb)
+        f"🤖 Агент запущен (бюджет до {budget} кр). Сообщу, когда будет план, вопрос или результат.\n"
+        f"Остановить можно кнопкой «{BTN_STOP_AGENT}» внизу", reply_markup=agent_keyboard())
     app.spawn(monitor_agent(app, bot, uid, run_id, gen_id, budget))
 
 
@@ -733,6 +801,19 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
         except ProviderError as e:
             log.warning("agent_get_run %s: %s", run_id, e)
             state = None
+        if state is not None and state.credits_used is not None and state.phase not in ("done", "failed", "cancelled"):
+            cap_units = agent_units(app, app.db.generation_cost(gen_id))
+            if state.credits_used > cap_units + max(2.0, cap_units * 0.1):
+                log.error("agent %s превысил бюджет: %s > %s", run_id, state.credits_used, cap_units)
+                try:
+                    await app.vilva.agent_cancel(run_id)
+                except ProviderError:
+                    pass
+                await notify_admins(app, bot, f"⚠️ Агент {run_id} превысил бюджет: потрачено {state.credits_used} "
+                                              f"кредитов Vilva при лимите {cap_units}. Остановлен")
+                await bot.send_message(uid, "⛔ Агент вышел за бюджет — остановил его")
+                state.phase = "cancelled"
+                break
         if state is not None:
             log_sig = (state.raw_status, state.resume_key, len(state.questions))
             if log_sig not in notified:
@@ -769,13 +850,15 @@ async def monitor_agent(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, 
     charged = agent_credits(app, used) if used else None
     if state and state.phase == "done":
         final = app.db.finish(gen_id, True, min(charged, cap) if charged else None)
-        await bot.send_message(uid, f"✅ Готово. Списано {final} из {cap} кр, баланс {app.db.balance(uid)} кр")
+        await bot.send_message(uid, f"✅ Готово. Списано {final} из {cap} кр, баланс {app.db.balance(uid)} кр",
+                               reply_markup=main_menu(app))
     elif charged:
         final = app.db.finish(gen_id, True, min(charged, cap))
-        await bot.send_message(uid, f"Агент остановлен. Списано за сделанное {final} кр, остальное вернул")
+        await bot.send_message(uid, f"Агент остановлен. Списано за сделанное {final} кр, остальное вернул",
+                               reply_markup=main_menu(app))
     else:
         app.db.finish(gen_id, False)
-        await bot.send_message(uid, "Агент остановлен, кредиты вернул")
+        await bot.send_message(uid, "Агент остановлен, кредиты вернул", reply_markup=main_menu(app))
 
 
 RESULTS_WAIT = 15 * 60
@@ -843,7 +926,7 @@ async def handle_pause(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, s
     question = plan.get("question") if isinstance(plan, dict) else None
     kind = str(question.get("kind") or question.get("type") or "") if isinstance(question, dict) else ""
     if "budget" in kind:
-        await send_budget_request(app, bot, uid, gen_id, question)
+        await stop_on_budget(app, bot, uid, run_id, question)
         return
     questions = extract_questions(plan) or state.questions
     if questions:
@@ -856,6 +939,22 @@ async def handle_pause(app: App, bot: Bot, uid: int, run_id: str, gen_id: int, s
         await send_questions(app, bot, uid, run_id, gen_id, state)
         return
     await send_plan(app, bot, uid, run_id, gen_id, plan)
+
+
+async def stop_on_budget(app: App, bot: Bot, uid: int, run_id: str, question: dict) -> None:
+    """Агент упёрся в лимит. Лимит не поднимаем: ответ «да» у Vilva снимает потолок без нашего контроля."""
+    qid = next((q.get("id") for q in question.get("questions") or [] if isinstance(q, dict)), "budget_continue")
+    try:
+        await app.vilva.agent_answer(run_id, "Stop here", {qid: False})
+    except ProviderError as e:
+        log.warning("agent budget stop %s: %s", run_id, e)
+        try:
+            await app.vilva.agent_cancel(run_id)
+        except ProviderError:
+            pass
+    await bot.send_message(
+        uid, "💸 Агент упёрся в выбранный бюджет — останавливаю, чтобы не потратить больше. "
+             "Пришлю то, что уже готово, неиспользованное верну. Для большой задачи запусти агента с бюджетом побольше")
 
 
 async def send_budget_request(app: App, bot: Bot, uid: int, gen_id: int, question: dict) -> None:
@@ -1237,6 +1336,19 @@ async def cb_agent_plan(callback: CallbackQuery, app: App) -> None:
     await callback.answer("Одобрено, агент работает" if approve == "1" else "Отклонено")
 
 
+async def btn_stop_agent(message: Message, app: App) -> None:
+    runs = [r for r in app.db.pending_agent_runs() if r[1] == message.from_user.id]
+    if not runs or not app.vilva:
+        await message.answer("Активного агента нет", reply_markup=main_menu(app))
+        return
+    for run_id, _, _ in runs:
+        try:
+            await app.vilva.agent_cancel(run_id)
+        except ProviderError as e:
+            log.warning("agent cancel %s: %s", run_id, e)
+    await message.answer("Останавливаю агента… пришлю, что успел сделать")
+
+
 async def cb_agent_cancel(callback: CallbackQuery, app: App) -> None:
     gen_id = callback.data.split(":", 1)[1]
     run = app.db.agent_run_by_gen(int(gen_id)) if gen_id.isdigit() else None
@@ -1304,6 +1416,7 @@ def create_router() -> Router:
     r.message.register(btn_kind, F.text.in_({BTN_IMAGE, BTN_VIDEO}))
     r.message.register(cmd_agent, Command("agent"))
     r.message.register(btn_agent, F.text == BTN_AGENT)
+    r.message.register(btn_stop_agent, F.text == BTN_STOP_AGENT)
     r.message.register(cmd_stats, Command("stats"))
     r.message.register(cmd_refund, Command("refund"))
     r.message.register(cmd_give, Command("give"))
@@ -1315,6 +1428,8 @@ def create_router() -> Router:
 
     r.callback_query.register(cb_settings, F.data == "settings")
     r.callback_query.register(cb_models, F.data.startswith("sm:"))
+    r.callback_query.register(cb_kind_panel, F.data.startswith("kp:"))
+    r.callback_query.register(cb_advanced_from_panel, F.data.startswith("sx:"))
     r.callback_query.register(cb_pick_model, F.data.startswith("pm:"))
     r.callback_query.register(cb_toggle_advanced, F.data == "adv")
     r.callback_query.register(cb_params, F.data.startswith("sp:"))
