@@ -361,7 +361,7 @@ class VilvaProvider:
         values: dict[str, Any] = {"prompt": prompt, "model": spec.arch, **params}
         if image is not None:
             values["image"] = "data:image/jpeg;base64," + base64.b64encode(image).decode()
-        result = await self.client.call_tool(tool, values)
+        result = await self._call_generate(tool, values)
         data = payload(result)
         units = _credits_used(data)
         url = _media_url(data, prefer)
@@ -376,6 +376,31 @@ class VilvaProvider:
                 raise ProviderError("vilva: готово, но нет url")
         ext = "png" if spec.kind == "image" else "mp4"
         return GenResult(Media(url=url, filename=f"{spec.kind}.{ext}"), units)
+
+    async def _call_generate(self, tool: str, values: dict[str, Any]) -> dict:
+        """Vilva иногда не видит длительность и считает цену как 0 («Required: 0») — тогда пробуем
+        передать её по-другому: строкой и под именем duration. Отказ с нулевой ценой ничего не списывает."""
+        try:
+            return await self.client.call_tool(tool, values)
+        except ProviderError as e:
+            if e.code != "invalid_params" or values.get("duration") in (None, ""):
+                raise
+            first = e
+        props = (getattr(self.client, "schemas", {}).get(tool) or {}).get("properties") or {}
+        name = next((n for n in ALIASES["duration"] if n in props), "duration")
+        rest = {k: v for k, v in values.items() if k != "duration"}
+        d = str(values["duration"])
+        num = int(float(d)) if d.replace(".", "", 1).isdigit() else d
+        variants = [{name: d}, {"duration": num}, {name: num, "duration": num}, {name: f"{d}s"}]
+        for raw in variants:
+            try:
+                result = await self.client.call_tool(tool, rest, raw=raw)
+                log.warning("vilva %s: длительность сработала в виде %s — стоит зашить", tool, raw)
+                return result
+            except ProviderError as e:
+                if e.code not in ("invalid_params", "tool_error"):
+                    raise
+        raise first
 
     async def _wait_generation(self, gen_id: str) -> Any:
         loop = asyncio.get_running_loop()

@@ -644,3 +644,27 @@ def test_vilva_kling_tiers_and_utilities():
     assert _rates_for_resolutions(rates, ("720p", "1080p", "4k")) == {"720p": 38.0, "1080p": 51.0, "4k": 126.0}
     assert _rates_for_resolutions({"480p": 1.0}, ("480p",)) == {"480p": 1.0}
     assert _is_utility("topaz-upscale") and _is_utility("heygen-lipsync-speed") and not _is_utility("seedance-2-5")
+
+
+def test_vilva_retries_duration_encoding():
+    from bot.catalog import ModelSpec
+    from bot.providers.base import ProviderError
+
+    calls = []
+
+    class FakeClient:
+        schemas = {"generate_video": {"properties": {"durationSeconds": {"type": "integer"}}}}
+
+        async def call_tool(self, name, values, raw=None):
+            calls.append((values, raw))
+            if not raw or "duration" not in raw:
+                raise ProviderError("Required: 0, Available: 2978", code="invalid_params")
+            return {"content": [{"type": "text", "text": json.dumps({"url": "https://cdn.vilva/v.mp4"})}]}
+
+        async def close(self):
+            pass
+
+    spec = ModelSpec("vilva:s", "vilva", "video", "Seedance", "seedance-2-fast")
+    res = asyncio.run(VilvaProvider(client=FakeClient()).generate(spec, "кот", {"duration": "5"}, None))
+    assert res.media.url == "https://cdn.vilva/v.mp4"
+    assert calls[-1][1] == {"duration": 5} and "duration" not in calls[-1][0]
