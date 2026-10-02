@@ -198,3 +198,15 @@ def test_welcome_and_regenerate(h):
     assert "Тестовая картинка" in result.caption and result.reply_markup.inline_keyboard[0][0].callback_data == "rg:image"
     h.feed(h.cb("rg:image"))
     assert [c[1] for c in h.provider.calls] == ["кот в очках", "кот в очках"]
+
+
+def test_negative_prompt_param(h):
+    h.db.ensure_user(42, "u", 500)
+    h.feed(h.msg(BTN_SETTINGS), h.cb("adv"), h.cb("sp:image"))
+    assert any(b.text.startswith("✏️ Негатив") for b in buttons(last_markup(h)))
+    h.feed(h.cb("pt:image:negative_prompt"), h.msg("blurry, lowres"))
+    assert h.db.get_settings(42)["params"]["mock:image"]["negative_prompt"] == "blurry, lowres"
+    h.feed(h.msg("кот"))
+    assert h.provider.calls[-1][2]["negative_prompt"] == "blurry, lowres"
+    h.feed(h.cb("pt:image:negative_prompt"), h.msg("0"))
+    assert "negative_prompt" not in h.db.get_settings(42)["params"]["mock:image"]

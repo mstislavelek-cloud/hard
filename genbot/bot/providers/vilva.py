@@ -74,8 +74,31 @@ def build_args(schema: dict | None, values: dict[str, Any]) -> dict:
                 name = names[0]
         if name == "approve" and isinstance(value, str):
             value = value == "approve"
-        args[name] = value
+        args[name] = _coerce(props.get(name), value)
     return args
+
+
+def _coerce(prop: dict | None, value: Any) -> Any:
+    """Строку из настроек бота приводит к типу из схемы: флаг, число или исходное значение enum."""
+    if not isinstance(prop, dict) or not isinstance(value, str):
+        return value
+    enums = list(prop.get("enum") or [])
+    for alt in prop.get("anyOf") or prop.get("oneOf") or ():
+        if isinstance(alt, dict):
+            enums += alt.get("enum") or []
+    for e in enums:
+        if (str(e).lower() if isinstance(e, bool) else str(e)) == value:
+            return e
+    kind = prop.get("type")
+    if kind == "boolean" and value in ("true", "false"):
+        return value == "true"
+    if kind in ("integer", "number"):
+        try:
+            num = float(value)
+            return int(num) if kind == "integer" or num.is_integer() else num
+        except ValueError:
+            return value
+    return value
 
 
 class McpClient:
@@ -270,6 +293,11 @@ class VilvaProvider:
                 continue
             tool = "generate_image" if kind == "image" else "generate_video"
             options = _schema_options(schemas.get(tool))
+            for key in list(options):
+                vals = (item.get(key + "s") or item.get(_camel(key) + "s") or item.get(key + "Options")
+                        or item.get(_camel(key) + "Options"))
+                if isinstance(vals, list) and vals and all(isinstance(v, (str, int, float)) for v in vals):
+                    options[key] = tuple(str(v) for v in vals)
             for key in ("aspect_ratio", "resolution", "duration"):
                 vals = item.get(key + "s") or item.get(_camel(key) + "s")
                 if isinstance(vals, list) and vals:
@@ -594,15 +622,37 @@ def _camel(s: str) -> str:
     return head + "".join(p.title() for p in rest)
 
 
+# Служебные поля generate_*, которые не показываем как настройки.
+SKIP_PARAMS = {"wait", "async", "sync", "stream", "dryrun", "dry_run", "public", "private", "notify", "webhook",
+               "webhookurl", "projectid", "workspaceid", "folderid"}
+
+
 def _schema_options(schema: dict | None) -> dict[str, tuple[str, ...]]:
+    """Параметры из inputSchema: формат/разрешение/длительность под общими именами, плюс все прочие enum и флаги."""
     props = (schema or {}).get("properties") or {}
-    options = {}
+    options: dict[str, tuple[str, ...]] = {}
+    taken: set[str] = set()
     for semantic in ("aspect_ratio", "resolution", "duration"):
         for name in ALIASES[semantic]:
             enum = (props.get(name) or {}).get("enum")
             if enum:
                 options[semantic] = tuple(str(v) for v in enum)
+                taken.add(name)
                 break
+    reserved = {n for key in ("prompt", "model", "image", "seed") for n in ALIASES[key]}
+    for name, prop in props.items():
+        if name in taken or name in reserved or name.lower() in SKIP_PARAMS or not isinstance(prop, dict):
+            continue
+        enum = prop.get("enum")
+        if not enum:
+            for alt in prop.get("anyOf") or prop.get("oneOf") or ():
+                if isinstance(alt, dict) and alt.get("enum"):
+                    enum = alt["enum"]
+                    break
+        if enum and len(enum) > 1:
+            options[name] = tuple(str(v).lower() if isinstance(v, bool) else str(v) for v in enum if v is not None)
+        elif prop.get("type") == "boolean":
+            options[name] = ("true", "false")
     return options
 
 

@@ -48,3 +48,8 @@
 1. BOT_TOKEN и ADMIN_IDS в `.env`
 2. запустить `py -m bot.check` у себя и прислать вывод
 3. цена gem у mage и кредита у vilva → подставить в `GEMS_PER_CREDIT` / `VILVA_CREDITS_PER_CREDIT`
+
+## 2026-10-02 — бренд Mirage, полный набор настроек
+- название сервиса: Mirage (`BOT_BRAND`), новый баннер с закатом и отражением-миражом (`bot/assets/make_welcome.py`)
+- аудит параметров mage по get_model всех 27 архитектур: добавлены негатив, шаги, guidance, улучшение промпта, поиск nano banana, звук melon, детейлер sdxl plus. влияние на цену снято через estimate_cost
+- vilva: в продвинутый режим идут все enum и флаги из схем generate_*, значения приводятся к типам схемы

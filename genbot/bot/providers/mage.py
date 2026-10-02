@@ -24,6 +24,10 @@ USER_MESSAGES = {
 }
 
 
+# Поля, которые Mage ждёт числом, а в настройках бота хранятся строкой.
+NUMERIC_FIELDS = {"num_inference_steps", "guidance_scale", "num_frames"}
+
+
 class MageProvider:
     def __init__(
         self,
@@ -59,6 +63,9 @@ class MageProvider:
         for k, v in params.items():
             if k == "seed":
                 config["seed"] = int(v)
+            elif k in NUMERIC_FIELDS:
+                num = float(v)
+                config[k] = int(num) if num.is_integer() else num
             elif v in ("true", "false"):
                 config[k] = v == "true"
             else:

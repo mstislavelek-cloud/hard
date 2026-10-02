@@ -91,3 +91,13 @@ def test_submit_error_envelope():
     with pytest.raises(ProviderError) as e:
         run(app, FLARE, {})
     assert e.value.code == "insufficient_gems"
+
+
+def test_numeric_and_text_params_sent_typed():
+    from bot.catalog import MAGE_MODELS
+    from bot.providers.mage import MageProvider
+
+    sdxl = next(m for m in MAGE_MODELS if m.key == "mage:sdxl")
+    cfg = MageProvider(key="k").build_config(
+        sdxl, "cat", {"num_inference_steps": "60", "guidance_scale": "7.5", "negative_prompt": "blurry"}, None)
+    assert cfg["num_inference_steps"] == 60 and cfg["guidance_scale"] == 7.5 and cfg["negative_prompt"] == "blurry"

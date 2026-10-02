@@ -219,3 +219,41 @@ def test_mage_reference_multiplier_not_cheaper():
     cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
     assert cat.estimate_units(cat.get("mage:wan22-video"), {"resolution": "480p"}, with_image=True) >= 195
     assert cat.estimate_units(cat.get("mage:wan22-video"), {"resolution": "720p"}, with_image=True) >= 595
+
+
+# продвинутые параметры mage, влияющие на цену (estimate_cost 2026-10-02)
+MAGE_PARAM_ESTIMATES = [
+    ("mage:nano-banana-v2", {"resolution": "1K", "web_search": "true"}, 121),
+    ("mage:nano-banana-v2", {"resolution": "1K", "web_search": "true", "image_search": "true"}, 141),
+    ("mage:nano-banana-v2", {"resolution": "1K", "thinking_level": "high"}, 101),
+    ("mage:melon", {"resolution": "720p", "duration": "10", "generate_audio": "true"}, 657),
+    ("mage:flux2-dev", {"resolution": "1k", "num_inference_steps": "20"}, 30),
+    ("mage:flux2-dev", {"resolution": "2k", "num_inference_steps": "50"}, 60),
+    ("mage:chroma-v1-hd", {"num_inference_steps": "80"}, 55),
+    ("mage:hidream-fast", {"num_inference_steps": "32"}, 30),
+    ("mage:sdxl-plus", {"num_inference_steps": "100"}, 20),
+]
+
+
+@pytest.mark.parametrize("key,params,gems", MAGE_PARAM_ESTIMATES)
+def test_mage_param_prices(key, params, gems):
+    cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
+    assert cat.estimate_units(cat.get(key), params) == gems
+
+
+def test_mage_steps_multiplier_not_cheaper():
+    cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
+    wan = cat.get("mage:wan22-video")
+    assert cat.estimate_units(wan, {"resolution": "720p", "num_inference_steps": "30"}) >= 985
+    ltx = cat.get("mage:ltx-video-096-distilled")
+    for res, gems in (("240p", 15), ("480p", 25), ("720p", 45)):
+        assert cat.estimate_units(ltx, {"resolution": res, "num_inference_steps": "16"}) >= gems
+
+
+def test_mage_advanced_options_exposed():
+    cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
+    assert "negative_prompt" in cat.get("mage:sdxl").text_params
+    assert {"web_search", "image_search", "thinking_level"} <= set(cat.get("mage:nano-banana-v2").options)
+    assert "prompt_extend" in cat.get("mage:guava-2-pro").options
+    lo, hi = cat.price_range(cat.get("mage:melon"))
+    assert hi > cat.price(cat.get("mage:melon"), {"resolution": "1080p", "duration": "16"})

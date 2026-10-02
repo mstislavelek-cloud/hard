@@ -55,8 +55,21 @@ PARAM_LABELS = {
     "audio": "Звук",
     "quality": "Качество",
     "effort": "Effort",
+    "prompt_extend": "Улучшить промпт",
+    "prompt_enhance": "Улучшить промпт",
+    "generate_audio": "Звук",
+    "thinking_level": "Обдумывание",
+    "web_search": "Поиск в интернете",
+    "image_search": "Поиск картинок",
+    "num_inference_steps": "Шаги",
+    "guidance_scale": "Следование промпту",
+    "prompt_weighting": "Веса в промпте",
+    "hires": "Hi-res доработка",
+    "adetailer_face": "Доработка лиц",
+    "adetailer_hands": "Доработка рук",
+    "negative_prompt": "Негатив",
 }
-VALUE_LABELS = {"true": "вкл", "false": "выкл"}
+VALUE_LABELS = {"true": "вкл", "false": "выкл", "minimal": "быстро", "high": "глубоко"}
 KIND_LABEL = {"image": "картинок", "video": "видео"}
 
 
@@ -111,7 +124,7 @@ def params_of(app: App, settings: dict, spec: ModelSpec) -> dict[str, str]:
     params = {k: v for k, v in spec.simple.items() if k in spec.options}
     for k, v in settings["params"].get(spec.key, {}).items():
         if k in QUICK_PARAMS or settings.get("advanced"):
-            if k == "seed" or v in spec.options.get(k, ()):
+            if k == "seed" or k in spec.text_params or v in spec.options.get(k, ()):
                 params[k] = v
     return params
 
@@ -186,7 +199,8 @@ def vlabel(v: str) -> str:
 
 
 def describe_params(spec: ModelSpec, params: dict[str, str]) -> str:
-    parts = [f"{PARAM_LABELS.get(k, k)}: {vlabel(v)}" for k, v in params.items() if k != "seed"]
+    parts = [f"{PARAM_LABELS.get(k, k)}: {vlabel(v)}" for k, v in params.items()
+             if k != "seed" and k not in spec.text_params]
     if "seed" in params:
         parts.append(f"seed: {params['seed']}")
     return ", ".join(parts)
@@ -306,6 +320,11 @@ def params_view(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardM
         value = params.get(name, "по умолчанию")
         rows.append([InlineKeyboardButton(
             text=f"{PARAM_LABELS.get(name, name)}: {VALUE_LABELS.get(value, value)}", callback_data=f"pp:{kind}:{name}")])
+    for name in spec.text_params:
+        value = params.get(name)
+        shown = (value[:20] + "…" if len(value) > 20 else value) if value else "нет"
+        rows.append([InlineKeyboardButton(text=f"✏️ {PARAM_LABELS.get(name, name)}: {shown}",
+                                          callback_data=f"pt:{kind}:{name}")])
     rows.append([InlineKeyboardButton(text=f"🎲 Seed: {params.get('seed', 'случайный')}", callback_data=f"ps:{kind}")])
     rows.append([
         InlineKeyboardButton(text="↩️ Сбросить", callback_data=f"pr:{kind}"),
@@ -339,7 +358,7 @@ WELCOME_IMAGE = os.path.join(os.path.dirname(__file__), "assets", "welcome.png")
 
 def help_text(app: App) -> str:
     text = (
-        "<b>Как пользоваться</b>\n\n"
+        f"<b>Как пользоваться {html.escape(app.cfg.brand)}</b>\n\n"
         f"{BTN_IMAGE} или {BTN_VIDEO} — выбери модель, формат и качество, потом просто пиши, что хочешь увидеть\n"
         "📎 <b>Фото с подписью</b> — изменю картинку или оживлю фото в видео\n"
         f"{BTN_SETTINGS} — модели и продвинутые параметры\n"
@@ -357,7 +376,7 @@ def welcome_text(app: App, name: str, is_new: bool) -> str:
     agent = "\n🤖 <b>Агент</b> — опиши задачу целиком, он сам всё спланирует и сделает" if app.vilva else ""
     return (
         f"<b>Привет, {html.escape(name)}!</b> 👋\n\n"
-        "Я — твоя студия нейросетей прямо в Telegram ✨\n\n"
+        f"Это <b>{html.escape(app.cfg.brand)}</b> — студия нейросетей прямо в Telegram ✨\n\n"
         f"🖼 <b>Картинки</b> — {image_count} моделей: GPT Image, Nano Banana, Seedream, Flux, Midjourney и другие\n"
         f"🎬 <b>Видео</b> — {video_count} моделей: из текста или оживляю твоё фото"
         f"{agent}\n{gift}\n"
@@ -416,7 +435,7 @@ async def cmd_buy(message: Message, app: App) -> None:
 
 async def cmd_terms(message: Message, app: App) -> None:
     await message.answer(
-        "Условия:\n"
+        f"Условия {app.cfg.brand}:\n"
         "• Кредиты покупаются за Telegram Stars и тратятся на генерации и работу агента.\n"
         "• Цена генерации показывается заранее; если генерация не удалась, кредиты возвращаются.\n"
         "• Для агента резервируется бюджет, неизрасходованная часть возвращается.\n"
@@ -575,6 +594,32 @@ async def cb_seed(callback: CallbackQuery, app: App) -> None:
     await callback.answer()
 
 
+async def cb_text_param(callback: CallbackQuery, app: App) -> None:
+    _, kind, name = callback.data.split(":", 2)
+    app.pending[callback.from_user.id] = ("text_param", kind, name)
+    await callback.message.answer(f"Пришли текст для «{PARAM_LABELS.get(name, name)}» "
+                                  "(например: blurry, lowres, extra fingers) или 0 — убрать")
+    await callback.answer()
+
+
+async def set_text_param(message: Message, app: App, kind: str, name: str) -> None:
+    uid = message.from_user.id
+    s = settings_of(app, uid)
+    spec = model_of(app, s, kind)
+    if name not in spec.text_params:
+        await message.answer("У этой модели нет такого параметра")
+        return
+    text = (message.text or "").strip()
+    p = s["params"].setdefault(spec.key, {})
+    if text in ("", "0"):
+        p.pop(name, None)
+    else:
+        p[name] = text[:500]
+    app.db.save_settings(uid, s)
+    t, kb = params_view(app, uid, kind)
+    await message.answer(t, reply_markup=kb)
+
+
 async def cb_reset_params(callback: CallbackQuery, app: App) -> None:
     kind = callback.data.split(":")[1]
     uid = callback.from_user.id
@@ -725,6 +770,9 @@ async def on_text(message: Message, app: App, bot: Bot) -> None:
     state = app.pending.pop(uid, None)
     if state and state[0] == "seed":
         await set_seed(message, app, state[1])
+        return
+    if state and state[0] == "text_param":
+        await set_text_param(message, app, state[1], state[2])
         return
     if state and state[0] == "agent_brief":
         await agent_choose_mode(message, app, message.text)
@@ -1627,6 +1675,7 @@ def create_router() -> Router:
     r.callback_query.register(cb_param_values, F.data.startswith("pp:"))
     r.callback_query.register(cb_set_value, F.data.startswith("pv:"))
     r.callback_query.register(cb_seed, F.data.startswith("ps:"))
+    r.callback_query.register(cb_text_param, F.data.startswith("pt:"))
     r.callback_query.register(cb_reset_params, F.data.startswith("pr:"))
     r.callback_query.register(cb_buy, F.data.startswith("buy:"))
     r.callback_query.register(cb_agent_mode, F.data.startswith("am:"))

@@ -40,6 +40,10 @@ class ModelSpec:
     # Доплата за фото-референс: + image_surcharge единиц, затем × image_multiplier.
     image_surcharge: float = 0.0
     image_multiplier: float = 1.0
+    # Как значение параметра меняет цену: {"web_search": {"true": (20, 1.0)}} — (+gems, ×множитель).
+    param_prices: dict[str, dict[str, tuple[float, float]]] = field(default_factory=dict)
+    # Параметры со свободным текстом (негативный промпт), вводятся сообщением.
+    text_params: tuple[str, ...] = ()
 
 
 def _durations(available: tuple[str, ...]) -> tuple[str, ...]:
@@ -216,15 +220,69 @@ MAGE_IMAGE_MULTIPLIER = {  # стартовый кадр у Wan и LTX доро�
     "mage:wan22-video": 1.21, "mage:wan22-video-lightning": 1.21,
     "mage:ltx-video-096-distilled": 1.21, "mage:ltx-video-096-dev": 1.21,
 }
-MAGE_MODELS = tuple(
-    dataclasses.replace(m, image_surcharge=float(MAGE_IMAGE_SURCHARGE.get(m.key, 0)),
-                        image_multiplier=MAGE_IMAGE_MULTIPLIER.get(m.key, 1.0))
-    for m in MAGE_MODELS
-)
+BOOL = ("true", "false")
+NEG = ("negative_prompt",)
+
+
+def _steps(values: dict[str, float | tuple[float, float]]) -> dict:
+    """Шаги генерации: {значение: +gems} или {значение: (+gems, ×множитель)}."""
+    return {"num_inference_steps": {k: (v if isinstance(v, tuple) else (float(v), 1.0)) for k, v in values.items()}}
+
+
+# Продвинутые параметры Mage по архитектуре (из get_model) и их влияние на цену (снято через estimate_cost).
+# Что не меняет цену или только удешевляет (детейлер SDXL Plus выкл.), не учитываем: разница вернётся по факту.
+MAGE_EXTRAS: dict[str, dict] = {
+    "nano_banana_v2": {"options": {"thinking_level": ("minimal", "high"), "web_search": BOOL, "image_search": BOOL},
+                       "prices": {"web_search": {"true": (20, 1.0)}, "image_search": {"true": (20, 1.0)}}},
+    "guava": {"options": {"prompt_extend": BOOL}},
+    "lemon": {"options": {"prompt_extend": BOOL}},
+    "blueberry": {"options": {"prompt_extend": BOOL}},
+    "melon": {"options": {"generate_audio": BOOL}, "prices": {"generate_audio": {"true": (79, 1.0)}}},
+    "flux2": {"options": {"num_inference_steps": ("20", "28", "40", "50"), "guidance_scale": ("2", "4", "7")},
+              "prices": _steps({"20": -10, "40": 10, "50": 20})},
+    "z_image": {"options": {"num_inference_steps": ("9", "18")}},
+    "krea_2": {"options": {"num_inference_steps": ("8", "16")}, "prices": _steps({"16": 5})},
+    "anima": {"options": {"num_inference_steps": ("30", "60"), "guidance_scale": ("3", "5", "8"),
+                          "prompt_weighting": BOOL}, "prices": _steps({"60": 5})},
+    "chroma": {"options": {"num_inference_steps": ("40", "80"), "guidance_scale": ("2", "3", "5")},
+               "prices": _steps({"80": 20})},
+    "hidream": {"options": {"num_inference_steps": ("16", "32")}, "prices": _steps({"32": 10}), "text": NEG},
+    "stable_diffusion_v35_large": {"options": {"num_inference_steps": ("28", "56"),
+                                               "guidance_scale": ("4.5", "7.5", "10")},
+                                   "prices": _steps({"56": 5}), "text": NEG},
+    "stable_diffusion_xl": {"options": {"num_inference_steps": ("30", "60"), "guidance_scale": ("4", "7", "10")},
+                            "text": NEG},
+    "sdxl_plus": {"options": {"num_inference_steps": ("50", "100"), "guidance_scale": ("3", "5", "8"),
+                              "hires": BOOL, "adetailer_face": BOOL, "adetailer_hands": BOOL},
+                  "prices": _steps({"100": 5}), "text": NEG},
+    "stable_diffusion_v15": {"options": {"num_inference_steps": ("20", "40"), "guidance_scale": ("5", "7.5", "10")},
+                             "text": NEG},
+    # Wan: 30 шагов ≈ ×2 на любом разрешении (480p 165→325, 720p 495→985).
+    "wan_22": {"options": {"num_inference_steps": ("15", "30"), "guidance_scale": ("2", "4", "6")},
+               "prices": _steps({"30": (0, 2.0)}), "text": NEG},
+    # LTX: 16 шагов дороже в 1.25–1.8 раза в зависимости от разрешения — берём верх.
+    "ltx_video": {"options": {"num_inference_steps": ("8", "16"), "guidance_scale": ("2", "3", "5"),
+                              "prompt_enhance": BOOL}, "prices": _steps({"16": (0, 1.8)}), "text": NEG},
+}
+
+
+def _with_extras(m: ModelSpec) -> ModelSpec:
+    extra = MAGE_EXTRAS.get(m.arch, {})
+    return dataclasses.replace(
+        m, image_surcharge=float(MAGE_IMAGE_SURCHARGE.get(m.key, 0)),
+        image_multiplier=MAGE_IMAGE_MULTIPLIER.get(m.key, 1.0),
+        options={**m.options, **extra.get("options", {})},
+        param_prices={k: {v: (float(a), float(x)) for v, (a, x) in t.items()} for k, t in extra.get("prices", {}).items()},
+        text_params=tuple(extra.get("text", ())),
+    )
+
+
+MAGE_MODELS = tuple(_with_extras(m) for m in MAGE_MODELS)
 
 MOCK_MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("mock:image", "mock", "image", "Тестовая картинка", "mock", base_units=6,
-              options={"aspect_ratio": ("1:1", "9:16")}, simple={"aspect_ratio": "1:1"}, image_field="image"),
+              options={"aspect_ratio": ("1:1", "9:16")}, simple={"aspect_ratio": "1:1"}, image_field="image",
+              text_params=NEG),
     ModelSpec("mock:video", "mock", "video", "Тестовое видео", "mock", base_units=60,
               options={"duration": ("5", "10")}, base={"duration": "5"}, simple={"duration": "5"},
               image_field="image"),
@@ -280,6 +338,12 @@ class Catalog:
     def estimate_units(self, spec: ModelSpec, params: dict[str, str], with_image: bool = False) -> float:
         """Стоимость у провайдера (gems / кредиты Vilva) при выбранных параметрах (и с фото-референсом)."""
         units = self._units(spec, params)
+        add, mult = 0.0, 1.0
+        for name, table in spec.param_prices.items():
+            a, x = table.get(params.get(name, ""), (0.0, 1.0))
+            add, mult = add + a, mult * x
+        if add or mult != 1.0:
+            units = float(math.ceil(max(units + add, 0) * mult - 1e-9))
         if with_image and (spec.image_surcharge or spec.image_multiplier != 1.0):
             units = float(math.ceil((units + spec.image_surcharge) * spec.image_multiplier - 1e-9))
         return units
@@ -331,7 +395,7 @@ class Catalog:
         """Минимальная и максимальная цена в кредитах по всем параметрам, влияющим на цену."""
         import itertools
 
-        keys = [k for k in PRICE_PARAMS if spec.options.get(k)]
+        keys = [k for k in (*PRICE_PARAMS, *spec.param_prices) if spec.options.get(k)]
         prices = [self.price(spec, dict(zip(keys, combo)))
                   for combo in itertools.product(*(spec.options[k] for k in keys))] if keys else []
         if not prices:

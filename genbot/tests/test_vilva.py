@@ -588,3 +588,23 @@ def test_vilva_doc_prices():
     assert len({cat.price(seed, {"resolution": r, "duration": d}) for r in ("480p", "1080p") for d in ("5", "10")}) == 4
     veo = apply_doc_prices(ModelSpec("vilva:v", "vilva", "video", "Veo 3.1 Fast", "v", base_units=1000))
     assert cat.estimate_units(veo, {}) == 270
+
+
+def test_schema_extra_params_and_coercion():
+    from bot.providers.vilva import _schema_options
+
+    schema = {"properties": {
+        "prompt": {"type": "string"}, "modelId": {"type": "string"}, "imageUrl": {"type": "string"},
+        "aspectRatio": {"type": "string", "enum": ["1:1", "16:9"]},
+        "duration": {"type": "integer", "enum": [5, 10]},
+        "generateAudio": {"type": "boolean"},
+        "cameraMotion": {"type": "string", "enum": ["static", "pan", "zoom"]},
+        "wait": {"type": "boolean"},
+        "seed": {"type": "integer"},
+    }}
+    opts = _schema_options(schema)
+    assert opts["aspect_ratio"] == ("1:1", "16:9") and opts["duration"] == ("5", "10")
+    assert opts["generateAudio"] == ("true", "false") and opts["cameraMotion"] == ("static", "pan", "zoom")
+    assert "wait" not in opts and "seed" not in opts and "prompt" not in opts
+    args = build_args(schema, {"prompt": "x", "duration": "10", "generateAudio": "true", "seed": "42"})
+    assert args["duration"] == 10 and args["generateAudio"] is True and args["seed"] == 42
