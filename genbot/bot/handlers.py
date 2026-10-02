@@ -22,7 +22,7 @@ from aiogram.types import (
     URLInputFile,
 )
 
-from .catalog import Catalog, ModelSpec
+from .catalog import Catalog, ModelSpec, family_of
 from .config import Config, Pack
 from .db import Database, InsufficientCredits
 from .moderation import check_prompt
@@ -204,19 +204,81 @@ def settings_view(app: App, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _range_text(lo: int, hi: int) -> str:
+    return f"{lo} кр" if lo == hi else f"{lo}–{hi} кр"
+
+
+def picker_providers(app: App, kind: str) -> list[str]:
+    order = {"mage": 0, "vilva": 1}
+    return sorted({m.provider for m in app.catalog.by_kind(kind)}, key=lambda p: (order.get(p, 9), p))
+
+
+def picker_families(app: App, kind: str, provider: str) -> list[tuple[str, list[ModelSpec]]]:
+    groups: dict[str, list[ModelSpec]] = {}
+    for m in sorted_models(app, kind):
+        if m.provider == provider:
+            groups.setdefault(family_of(m), []).append(m)
+    return sorted(groups.items(), key=lambda kv: (min(app.catalog.price_range(m)[0] for m in kv[1]), kv[0]))
+
+
+def _back(kind: str, ret: str) -> str:
+    return f"kp:{kind}" if ret == "k" else "settings"
+
+
 def models_view(app: App, user_id: int, kind: str, ret: str = "s") -> tuple[str, InlineKeyboardMarkup]:
-    s = settings_of(app, user_id)
-    current = model_of(app, s, kind)
-    lines = [f"Выбери модель {KIND_LABEL[kind]} (цена при базовых параметрах, от дешёвых):\n"]
+    """Шаг 1: провайдер."""
+    providers = picker_providers(app, kind)
+    if len(providers) == 1:
+        return families_view(app, user_id, kind, 0, ret)
+    current = model_of(app, settings_of(app, user_id), kind)
     rows = []
-    for i, m in enumerate(sorted_models(app, kind)):
-        price = app.catalog.price(m, {k: v for k, v in m.simple.items() if k in m.options})
+    for pi, prov in enumerate(providers):
+        models = [m for m in app.catalog.by_kind(kind) if m.provider == prov]
+        lo = min(app.catalog.price_range(m)[0] for m in models)
+        mark = "✅ " if current and current.provider == prov else ""
+        name = {"mage": "Mage", "vilva": "Vilva"}.get(prov, prov)
+        rows.append([InlineKeyboardButton(text=f"{mark}{name} · {len(models)} мод. · от {lo} кр",
+                                          callback_data=f"mf:{kind}:{pi}:{ret}")])
+    rows.append([InlineKeyboardButton(text="« Назад", callback_data=_back(kind, ret))])
+    return f"Выбери провайдера {KIND_LABEL[kind]}:", InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def families_view(app: App, user_id: int, kind: str, pi: int, ret: str) -> tuple[str, InlineKeyboardMarkup]:
+    """Шаг 2: семейство моделей провайдера."""
+    providers = picker_providers(app, kind)
+    prov = providers[min(pi, len(providers) - 1)]
+    current = model_of(app, settings_of(app, user_id), kind)
+    rows = []
+    for fi, (fam, models) in enumerate(picker_families(app, kind, prov)):
+        lo = min(app.catalog.price_range(m)[0] for m in models)
+        hi = max(app.catalog.price_range(m)[1] for m in models)
+        mark = "✅ " if current and current in models else ""
+        count = f" · {len(models)} мод." if len(models) > 1 else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{fam}{count} · {_range_text(lo, hi)}",
+                                          callback_data=f"mm:{kind}:{pi}:{fi}:{ret}")])
+    back = f"sm:{kind}:{ret}" if len(providers) > 1 else _back(kind, ret)
+    rows.append([InlineKeyboardButton(text="« Назад", callback_data=back)])
+    name = {"mage": "Mage", "vilva": "Vilva"}.get(prov, prov)
+    return f"{name}: выбери семейство моделей {KIND_LABEL[kind]}", InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def family_models_view(app: App, user_id: int, kind: str, pi: int, fi: int, ret: str):
+    """Шаг 3: конкретная модель семейства."""
+    providers = picker_providers(app, kind)
+    prov = providers[min(pi, len(providers) - 1)]
+    families = picker_families(app, kind, prov)
+    fam, models = families[min(fi, len(families) - 1)]
+    current = model_of(app, settings_of(app, user_id), kind)
+    all_models = sorted_models(app, kind)
+    lines = [f"{fam} — выбери модель (цена зависит от разрешения, качества и длительности):\n"]
+    rows = []
+    for n, m in enumerate(models, 1):
+        lo, hi = app.catalog.price_range(m)
         mark = "✅ " if current and m.key == current.key else ""
-        if m.note and len(lines) < 30:
-            lines.append(f"• {provider_tag(m)} · {m.title} — {m.note}")
-        rows.append([InlineKeyboardButton(text=f"{mark}{provider_tag(m)} · {m.title} · ~{price} кр",
-                                          callback_data=f"pm:{kind}:{i}:{ret}")])
-    rows.append([InlineKeyboardButton(text="« Назад", callback_data=f"kp:{kind}" if ret == "k" else "settings")])
+        lines.append(f"{n}. {m.title} — {_range_text(lo, hi)}" + (f". {m.note}" if m.note else ""))
+        rows.append([InlineKeyboardButton(text=f"{mark}{n}. {m.title} · {_range_text(lo, hi)}",
+                                          callback_data=f"pm:{kind}:{all_models.index(m)}:{ret}")])
+    rows.append([InlineKeyboardButton(text="« Назад", callback_data=f"mf:{kind}:{pi}:{ret}")])
     return "\n".join(lines)[:4000], InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -371,8 +433,34 @@ async def cb_models(callback: CallbackQuery, app: App) -> None:
     await callback.answer()
 
 
+async def cb_families(callback: CallbackQuery, app: App) -> None:
+    _, kind, pi, ret = callback.data.split(":")
+    text, kb = families_view(app, callback.from_user.id, kind, int(pi), ret)
+    await safe_edit(callback, text, kb)
+    await callback.answer()
+
+
+async def cb_family_models(callback: CallbackQuery, app: App) -> None:
+    _, kind, pi, fi, ret = callback.data.split(":")
+    providers = picker_providers(app, kind)
+    families = picker_families(app, kind, providers[min(int(pi), len(providers) - 1)])
+    models = families[min(int(fi), len(families) - 1)][1]
+    if len(models) == 1:
+        # В семействе одна модель — выбираем сразу.
+        callback_data = f"pm:{kind}:{sorted_models(app, kind).index(models[0])}:{ret}"
+        await _pick(callback, app, callback_data)
+        return
+    text, kb = family_models_view(app, callback.from_user.id, kind, int(pi), int(fi), ret)
+    await safe_edit(callback, text, kb)
+    await callback.answer()
+
+
 async def cb_pick_model(callback: CallbackQuery, app: App) -> None:
-    parts = callback.data.split(":")
+    await _pick(callback, app, callback.data)
+
+
+async def _pick(callback: CallbackQuery, app: App, data: str) -> None:
+    parts = data.split(":")
     kind, idx, ret = parts[1], parts[2], (parts[3] if len(parts) > 3 else "s")
     models = sorted_models(app, kind)
     if not idx.isdigit() or int(idx) >= len(models):
@@ -1455,6 +1543,8 @@ def create_router() -> Router:
     r.callback_query.register(cb_settings, F.data == "settings")
     r.callback_query.register(cb_models, F.data.startswith("sm:"))
     r.callback_query.register(cb_kind_panel, F.data.startswith("kp:"))
+    r.callback_query.register(cb_families, F.data.startswith("mf:"))
+    r.callback_query.register(cb_family_models, F.data.startswith("mm:"))
     r.callback_query.register(cb_advanced_from_panel, F.data.startswith("sx:"))
     r.callback_query.register(cb_pick_model, F.data.startswith("pm:"))
     r.callback_query.register(cb_toggle_advanced, F.data == "adv")

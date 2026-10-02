@@ -35,6 +35,7 @@ class ModelSpec:
     price_grid: dict[tuple, float] = field(default_factory=dict)
     # Цена за секунду по разрешению: {"480p": 81.6, "720p": 168}.
     rate_by_res: dict[str, float] = field(default_factory=dict)
+    family: str = ""             # семейство для меню выбора (GPT Image, Seedance, Nano Banana…)
 
 
 def _mage_image(model_id: str, arch: str, title: str, grid: dict[tuple, float], note: str,
@@ -63,7 +64,7 @@ def _mage_video(model_id: str, arch: str, title: str, rates: dict[str, float], a
         key=f"mage:{model_id}", provider="mage", kind="video", title=title, arch=arch, model_id=model_id,
         base_units=math.ceil(rates["480p"] * 5 - 1e-9), options=options,
         simple={"aspect_ratio": "9:16", "resolution": "480p", "duration": "5"},
-        image_field=image_field, note=note, rate_by_res=rates,
+        image_field=image_field, note=note, rate_by_res=rates, family=arch.title(),
     )
 
 
@@ -101,6 +102,30 @@ MOCK_MODELS: tuple[ModelSpec, ...] = (
               options={"duration": ("5", "10")}, base={"duration": "5"}, simple={"duration": "5"},
               image_field="image"),
 )
+
+
+KNOWN_FAMILIES = (
+    "Nano Banana", "GPT Image", "GPT-4o Image", "Seedance", "Seedream", "Flux", "Qwen Image", "Z Image",
+    "Grok Imagine", "Midjourney", "Kling AI Avatar", "Kling", "Veo", "Hailuo", "Wan", "Sora", "Ideogram", "Recraft",
+    "Mango", "Guava", "Lemon", "Cherry",
+)
+PRICE_PARAMS = ("resolution", "quality", "effort", "duration")
+
+
+def family_of(spec: ModelSpec) -> str:
+    """Семейство модели: явное, из известных префиксов или название до номера версии."""
+    if spec.family:
+        return spec.family
+    low = spec.title.lower()
+    for fam in KNOWN_FAMILIES:
+        if low == fam.lower() or low.startswith(fam.lower() + " "):
+            return fam
+    words = []
+    for w in spec.title.split():
+        if any(ch.isdigit() for ch in w):
+            break
+        words.append(w)
+    return " ".join(words) or spec.title
 
 
 class Catalog:
@@ -167,6 +192,17 @@ class Catalog:
         """Себестоимость в $ по ценам провайдера (mock считаем как Mage)."""
         rate = self.cfg.vilva_usd_per_credit if provider == "vilva" else self.cfg.mage_usd_per_gem
         return units * rate
+
+    def price_range(self, spec: ModelSpec) -> tuple[int, int]:
+        """Минимальная и максимальная цена в кредитах по всем параметрам, влияющим на цену."""
+        import itertools
+
+        keys = [k for k in PRICE_PARAMS if spec.options.get(k)]
+        prices = [self.price(spec, dict(zip(keys, combo)))
+                  for combo in itertools.product(*(spec.options[k] for k in keys))] if keys else []
+        if not prices:
+            prices = [self.price(spec, {})]
+        return min(prices), max(prices)
 
     def price(self, spec: ModelSpec, params: dict[str, str]) -> int:
         return self.credits(spec, self.estimate_units(spec, params))

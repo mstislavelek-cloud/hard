@@ -142,3 +142,35 @@ def test_admin_prices_audit(h):
     h.feed(h.msg("/prices", uid=1))
     text = "\n".join(h.session.texts())
     assert "Курсы:" in text and "Тестовая картинка" in text and "→" in text
+
+
+def test_model_picker_provider_family_model(tmp_path):
+    from bot.catalog import MOCK_MODELS, ModelSpec
+    from tests.conftest import Harness
+
+    nb = [ModelSpec(f"vilva:nb{i}", "vilva", "image", title, f"nb{i}", base_units=6,
+                    options={"resolution": ("1K", "2K")}, simple={"resolution": "1K"},
+                    price_table={"resolution": {"1K": 6, "2K": 18}})
+          for i, title in enumerate(("Nano Banana 2", "Nano Banana 2 Lite"))]
+    z = ModelSpec("vilva:z", "vilva", "image", "Z Image", "z", base_units=2)
+    h = Harness(tmp_path, models=list(MOCK_MODELS) + nb + [z])
+    h.db.ensure_user(42, "u", 500)
+    h.feed(h.msg(BTN_IMAGE), h.cb("sm:image:k"))
+    provs = [b.text for b in buttons(last_markup(h))]
+    assert any(t.startswith("Vilva · 3 мод.") for t in provs)
+    vilva_cb = next(b.callback_data for b in buttons(last_markup(h)) if b.text.startswith("Vilva"))
+    h.feed(h.cb(vilva_cb))
+    fams = {b.text.split(" ·")[0]: b.callback_data for b in buttons(last_markup(h)) if b.callback_data.startswith("mm:")}
+    assert set(fams) == {"Nano Banana", "Z Image"}
+    # семейство с одной моделью выбирается сразу и возвращает на панель
+    h.feed(h.cb(fams["Z Image"]))
+    assert h.db.get_settings(42)["image_model"] == "vilva:z"
+    assert buttons(last_markup(h))[0].text.startswith("🧠 Vilva · Z Image")
+    # семейство из двух — список с номерами и диапазоном цен
+    h.feed(h.cb("sm:image:k"), h.cb(vilva_cb), h.cb(fams["Nano Banana"]))
+    models = [b for b in buttons(last_markup(h)) if b.callback_data.startswith("pm:")]
+    assert [b.text.split(" ·")[0] for b in models] == ["1. Nano Banana 2", "2. Nano Banana 2 Lite"]
+    assert "–" in models[0].text   # диапазон цен 1K…2K
+    h.feed(h.cb(models[1].callback_data))
+    assert h.db.get_settings(42)["image_model"] == "vilva:nb1"
+    h.db.close()
