@@ -20,6 +20,9 @@ async def check_vilva(url: str, key: str) -> None:
     try:
         schemas = await client.list_tools()
         print(f"vilva: инструментов {len(schemas)}")
+        with open("vilva_tools.json", "w", encoding="utf-8") as f:
+            json.dump(schemas, f, ensure_ascii=False, indent=1)
+        print("vilva: схемы инструментов сохранены в vilva_tools.json")
         for name, schema in schemas.items():
             print(f"  - {name}: {json.dumps(schema.get('properties', {}), ensure_ascii=False)[:400]}")
         for name in ("get_credit_balance", "list_models"):

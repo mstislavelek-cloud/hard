@@ -895,6 +895,8 @@ async def generate(app: App, bot: Bot, message: Message, kind: str, prompt: str,
         return
     if error.code in ("insufficient_gems", "insufficient_credits"):
         await notify_admins(app, bot, f"⚠️ У провайдера {spec.provider} кончился баланс: {error}")
+    elif error.code == "invalid_params":
+        await notify_admins(app, bot, f"⚠️ {spec.title} ({spec.key}) не принял параметры {params}: {error}")
     await message.answer((error.user_message or "Не получилось сгенерировать.") + " Кредиты вернул")
 
 

@@ -199,10 +199,32 @@ class McpClient:
                 raise ProviderError(f"vilva {name}: пустой результат")
             if result.get("isError"):
                 text = _text(result)
-                code = "insufficient_credits" if "credit" in text.lower() else "tool_error"
-                raise ProviderError(f"vilva {name}: {text[:500]}", code=code)
+                code = _error_code(text)
+                log.warning("vilva %s отказал (%s), аргументы: %s", name, code, _loggable(args))
+                user = None
+                if code == "invalid_params":
+                    user = "Модель не приняла параметры — попробуй другую длительность или разрешение"
+                raise ProviderError(f"vilva {name}: {text[:500]}", code=code, user_message=user)
             return result
         raise ProviderError("vilva: не удалось вызвать инструмент")
+
+
+def _error_code(text: str) -> str:
+    """Код ошибки Vilva. «Insufficient credits … Required: 0, Available: 2978» — это не пустой баланс:
+    Vilva не смогла посчитать цену, то есть не приняла параметры запроса."""
+    low = text.lower()
+    if "credit" not in low:
+        return "tool_error"
+    req = re.search(r"required\D*([\d.]+)", low)
+    avail = re.search(r"available\D*([\d.]+)", low)
+    if req and avail and float(req.group(1)) <= float(avail.group(1)):
+        return "invalid_params"
+    return "insufficient_credits"
+
+
+def _loggable(args: dict) -> dict:
+    """Аргументы для лога без base64-картинок."""
+    return {k: (v[:40] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in args.items()}
 
 
 class _SessionExpired(Exception):

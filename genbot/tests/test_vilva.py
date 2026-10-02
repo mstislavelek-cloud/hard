@@ -626,3 +626,12 @@ def test_vilva_durations_from_range_description_and_docs():
     spec = apply_doc_prices(ModelSpec("vilva:s25", "vilva", "video", "Seedance 2.5", "s25",
                                       options={"resolution": ("480p", "720p")}, simple={"resolution": "720p"}))
     assert spec.options["duration"][-1] == "30" and spec.simple["duration"] == "5"
+
+
+def test_vilva_error_codes():
+    from bot.providers.vilva import _error_code
+
+    assert _error_code('{"error": "Insufficient credits for seedance-2-5. Required: 0, Available: 2978"}') == "invalid_params"
+    assert _error_code("Insufficient credits. Required: 625, Available: 100") == "insufficient_credits"
+    assert _error_code("Not enough credits") == "insufficient_credits"
+    assert _error_code("Model not found") == "tool_error"

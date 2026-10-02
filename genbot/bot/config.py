@@ -28,6 +28,7 @@ DEFAULT_PACKS = (
 class Config:
     bot_token: str
     brand: str = "Mirage"
+    telegram_proxy: str = ""
     db_path: str = "genbot.sqlite3"
     mage_key: str = ""
     mage_base_url: str = "https://api.mage.space/v1"
@@ -91,6 +92,7 @@ def load_config() -> Config:
     return Config(
         bot_token=token,
         brand=os.getenv("BOT_BRAND", Config.brand),
+        telegram_proxy=os.getenv("TELEGRAM_PROXY", ""),
         db_path=os.getenv("DB_PATH", "genbot.sqlite3"),
         mage_key=mage_key,
         mage_base_url=os.getenv("MAGE_BASE_URL", Config.mage_base_url),

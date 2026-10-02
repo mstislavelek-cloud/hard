@@ -5,6 +5,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand
 
 from .catalog import build_catalog
@@ -51,7 +52,9 @@ async def main() -> None:
     db = Database(cfg.db_path)
     app = build_app(cfg, db)
     await load_vilva_models(app)
-    bot = Bot(cfg.bot_token)
+    # TELEGRAM_PROXY — если api.telegram.org недоступен напрямую (http://… или socks5://…, для socks нужен aiohttp-socks).
+    session = AiohttpSession(proxy=cfg.telegram_proxy) if cfg.telegram_proxy else None
+    bot = Bot(cfg.bot_token, session=session) if session else Bot(cfg.bot_token)
     dp = build_dispatcher(app)
     commands = [
         BotCommand(command="start", description="Начать"),
