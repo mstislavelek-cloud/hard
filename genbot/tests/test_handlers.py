@@ -107,7 +107,7 @@ def test_buy_and_payment(h):
     inv = [c for c in h.session.calls if isinstance(c, SendInvoice)][0]
     assert inv.currency == "XTR" and inv.prices[0].amount == 100
     assert [c for c in h.session.calls if isinstance(c, AnswerPreCheckoutQuery)][0].ok
-    assert h.db.balance(42) == 23
+    assert h.db.balance(42) == 43   # 3 подарочных + пакет 100⭐ = 40 кр
 
 
 def test_bad_pre_checkout_rejected(h):

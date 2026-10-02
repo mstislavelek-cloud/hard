@@ -59,7 +59,8 @@ class Harness:
         # Курсы подобраны для круглых чисел: 6 gems = 1 кр до наценки, 1 кредит Vilva = 1 кр до наценки.
         self.cfg = cfg or Config(bot_token="123:abc", admin_ids=frozenset({1}), use_mock=True,
                                  default_image_model="mock:image", default_video_model="mock:video",
-                                 mage_usd_per_gem=1 / 6, vilva_usd_per_credit=1.0, credit_usd=1.0)
+                                 mage_usd_per_gem=1 / 6, vilva_usd_per_credit=1.0, credit_usd=1.0,
+                                 markup=2.0, agent_budgets=(50, 150, 400))
         self.db = Database(str(tmp_path / "t.sqlite3"))
         self.provider = MockProvider()
         self.app = App(cfg=self.cfg, db=self.db, catalog=Catalog(self.cfg, list(models or MOCK_MODELS)),

@@ -16,10 +16,10 @@ class Pack:
 
 
 DEFAULT_PACKS = (
-    Pack("s", 100, 20, "Старт — 20 кредитов"),
-    Pack("m", 250, 60, "Оптимальный — 60 кредитов"),
-    Pack("l", 600, 160, "Профи — 160 кредитов"),
-    Pack("xl", 1500, 450, "Студия — 450 кредитов"),
+    Pack("s", 100, 40, "Старт — 40 кредитов"),
+    Pack("m", 250, 120, "Оптимальный — 120 кредитов"),
+    Pack("l", 600, 320, "Профи — 320 кредитов"),
+    Pack("xl", 1500, 900, "Студия — 900 кредитов"),
 )
 
 
@@ -35,14 +35,14 @@ class Config:
     # Себестоимость единиц провайдеров в $: Mage 10 000 gems = $10, Vilva 4 000 кредитов = $21.
     mage_usd_per_gem: float = 0.001
     vilva_usd_per_credit: float = 21 / 4000
-    # Сколько $ приносит 1 кредит бота: пакет 100⭐ = 20 кр, 1000⭐ ≈ $13.3 → ≈ $0.0665 за кредит.
-    credit_usd: float = 0.0665
+    # Сколько $ приносит 1 кредит бота: пакет 100⭐ = 40 кр, 1000⭐ ≈ $13.3 → ≈ $0.033 за кредит.
+    credit_usd: float = 0.03325
     # Наценка поверх себестоимости.
-    markup: float = 2.0
+    markup: float = 1.6
     default_image_model: str = "mage:gpt-image-2.5-flare"
     default_video_model: str = "mage:lemon"
     # Бюджеты агента в кредитах бота, из которых выбирает пользователь.
-    agent_budgets: tuple[int, ...] = (50, 150, 400)
+    agent_budgets: tuple[int, ...] = (100, 300, 800)
     free_credits: int = 3  # «3 кредита в подарок» нарисовано на баннере bot/assets/welcome.jpg
     admin_ids: frozenset[int] = field(default_factory=frozenset)
     support_contact: str = "@support"

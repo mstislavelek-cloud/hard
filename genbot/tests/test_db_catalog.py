@@ -163,14 +163,14 @@ def test_mage_prices_match_estimate_cost(key, params, gems):
 
 
 def test_mage_credit_prices():
-    # 10 000 gems = $10, 1 кр бота ≈ $0.0665, наценка ×2
+    # 10 000 gems = $10, 1 кр бота ≈ $0.033 (100⭐ = 40 кр), наценка ×1.6
     cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
     flare = cat.get("mage:gpt-image-2.5-flare")
     assert cat.price(flare, {"resolution": "1K", "quality": "low"}) == 1
-    assert cat.price(flare, {"resolution": "2K", "quality": "high"}) == 20   # 634 gems = $0.634
+    assert cat.price(flare, {"resolution": "2K", "quality": "high"}) == 31   # 634 gems = $0.634
     lemon = cat.get("mage:lemon")
-    assert cat.price(lemon, {"resolution": "480p", "duration": "5"}) == 13
-    assert cat.price(lemon, {"resolution": "1080p", "duration": "5"}) == 51
+    assert cat.price(lemon, {"resolution": "480p", "duration": "5"}) == 20
+    assert cat.price(lemon, {"resolution": "1080p", "duration": "5"}) == 81
     assert cat.default("image").key == "mage:gpt-image-2.5-flare"
     assert cat.default("video").key == "mage:lemon"
 
@@ -181,7 +181,7 @@ def test_vilva_credit_conversion():
     from bot.catalog import ModelSpec
 
     gpt = ModelSpec("vilva:gpt", "vilva", "image", "GPT Image 2.5", "gpt", base_units=9)
-    assert cat.price(gpt, {}) == 2   # 9 × $0.00525 = $0.047 → ×2 / 0.0665 = 1.42
+    assert cat.price(gpt, {}) == 3   # 9 × $0.00525 = $0.047 → ×1.6 / 0.03325 = 2.27
     mage_gpt = ModelSpec("mage:gpt", "mage", "image", "GPT Image 2.5", "gpt", base_units=9)
     assert cat.price(mage_gpt, {}) == 1   # 9 gems = $0.009 — у Mage та же модель дешевле
 
