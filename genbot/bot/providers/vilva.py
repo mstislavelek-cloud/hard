@@ -37,7 +37,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "image": ("imageUrl", "image_url", "image", "inputImage", "startImage", "referenceImage", "sourceImage"),
     "aspect_ratio": ("aspectRatio", "aspect_ratio", "ratio"),
     "resolution": ("resolution", "quality", "size"),
-    "duration": ("duration", "durationSeconds", "seconds", "length"),
+    "duration": ("duration", "durationSeconds", "durationSec", "seconds", "length"),
     "seed": ("seed",),
     "effort": ("effort", "quality", "reasoningEffort"),
     "generation_id": ("generationId", "generation_id", "id"),
@@ -298,10 +298,14 @@ class VilvaProvider:
                         or item.get(_camel(key) + "Options"))
                 if isinstance(vals, list) and vals and all(isinstance(v, (str, int, float)) for v in vals):
                     options[key] = tuple(str(v) for v in vals)
-            for key in ("aspect_ratio", "resolution", "duration"):
+            for key in ("aspect_ratio", "resolution"):
                 vals = item.get(key + "s") or item.get(_camel(key) + "s")
                 if isinstance(vals, list) and vals:
                     options[key] = tuple(str(v) for v in vals)
+            if kind == "video":
+                durations = _item_durations(item)
+                if durations:
+                    options["duration"] = durations
             base, table, per_second, rate_by_res = _parse_credits(item)
             simple = {}
             if "aspect_ratio" in options:
@@ -622,6 +626,49 @@ def _camel(s: str) -> str:
     return head + "".join(p.title() for p in rest)
 
 
+NICE_DURATIONS = (3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30)
+
+
+def _durations_between(lo: float, hi: float) -> tuple[str, ...]:
+    picked = [d for d in NICE_DURATIONS if lo <= d <= hi]
+    if hi not in picked and hi <= 60:
+        picked.append(int(hi))
+    return tuple(str(d) for d in picked)
+
+
+def _duration_range(prop) -> tuple[str, ...]:
+    """Длительности из числового поля схемы с minimum/maximum (без enum)."""
+    if not isinstance(prop, dict):
+        return ()
+    for alt in (prop, *(prop.get("anyOf") or ()), *(prop.get("oneOf") or ())):
+        if isinstance(alt, dict) and isinstance(alt.get("maximum"), (int, float)):
+            lo = alt.get("minimum") if isinstance(alt.get("minimum"), (int, float)) else 1
+            return _durations_between(float(lo), float(alt["maximum"]))
+    return ()
+
+
+def _item_durations(item: dict) -> tuple[str, ...]:
+    """Длительности из описания модели в list_models: список, min/max или «up to 30s» в описании."""
+    for k in ("durations", "durationOptions", "supportedDurations", "allowedDurations"):
+        vals = item.get(k)
+        if isinstance(vals, list) and vals and all(isinstance(v, (int, float, str)) for v in vals):
+            return tuple(str(v).rstrip("s") for v in vals)
+    rng = item.get("durationRange") or item.get("duration")
+    if isinstance(rng, dict):
+        hi = rng.get("max") or rng.get("maximum")
+        lo = rng.get("min") or rng.get("minimum") or 1
+        if isinstance(hi, (int, float)):
+            return _durations_between(float(lo), float(hi))
+    hi = item.get("maxDuration") or item.get("maxDurationSeconds") or item.get("maxSeconds")
+    if isinstance(hi, (int, float)):
+        lo = item.get("minDuration") or item.get("minDurationSeconds") or 1
+        return _durations_between(float(lo if isinstance(lo, (int, float)) else 1), float(hi))
+    m = re.search(r"up to (\d+)\s*(?:s\b|sec|second)", str(item.get("description") or ""), re.I)
+    if m:
+        return _durations_between(4, float(m.group(1)))
+    return ()
+
+
 # Служебные поля generate_*, которые не показываем как настройки.
 SKIP_PARAMS = {"wait", "async", "sync", "stream", "dryrun", "dry_run", "public", "private", "notify", "webhook",
                "webhookurl", "projectid", "workspaceid", "folderid"}
@@ -637,6 +684,13 @@ def _schema_options(schema: dict | None) -> dict[str, tuple[str, ...]]:
             enum = (props.get(name) or {}).get("enum")
             if enum:
                 options[semantic] = tuple(str(v) for v in enum)
+                taken.add(name)
+                break
+    if "duration" not in options:
+        for name in ALIASES["duration"]:
+            rng = _duration_range(props.get(name))
+            if rng:
+                options["duration"] = rng
                 taken.add(name)
                 break
     reserved = {n for key in ("prompt", "model", "image", "seed") for n in ALIASES[key]}

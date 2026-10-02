@@ -608,3 +608,21 @@ def test_schema_extra_params_and_coercion():
     assert "wait" not in opts and "seed" not in opts and "prompt" not in opts
     args = build_args(schema, {"prompt": "x", "duration": "10", "generateAudio": "true", "seed": "42"})
     assert args["duration"] == 10 and args["generateAudio"] is True and args["seed"] == 42
+
+
+def test_vilva_durations_from_range_description_and_docs():
+    from bot.catalog import ModelSpec
+    from bot.providers.vilva import _item_durations, _schema_options
+    from bot.vilva_prices import apply_doc_prices
+
+    # диапазон в схеме вместо enum
+    opts = _schema_options({"properties": {"duration": {"type": "integer", "minimum": 4, "maximum": 15}}})
+    assert opts["duration"] == ("4", "5", "6", "8", "10", "12", "15")
+    # «up to 30s» в описании модели
+    item = {"key": "seedance-2-5", "description": "ByteDance's newest video model — up to 30s in ONE shot"}
+    assert _item_durations(item)[-1] == "30" and "5" in _item_durations(item)
+    assert _item_durations({"maxDuration": 10, "minDuration": 5}) == ("5", "6", "8", "10")
+    # ни схема, ни list_models не дали длительность — берём из документации
+    spec = apply_doc_prices(ModelSpec("vilva:s25", "vilva", "video", "Seedance 2.5", "s25",
+                                      options={"resolution": ("480p", "720p")}, simple={"resolution": "720p"}))
+    assert spec.options["duration"][-1] == "30" and spec.simple["duration"] == "5"

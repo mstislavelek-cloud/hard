@@ -38,18 +38,18 @@ IMAGE_PRICES: dict[str, dict] = {
 # Видео: кредиты в секунду (диапазон от младшего разрешения к старшему) или за ролик.
 # "rates" — точные ставки за секунду, снятые в интерфейсе Vilva (ролик 4 и 5 сек), имеют приоритет.
 VIDEO_PRICES: dict[str, dict] = {
-    "seedance 2.0": {"rates": {"480p": 41, "720p": 92, "1080p": 205, "4K": 208}},
-    "seedance 2.0 fast": {"rates": {"480p": 33, "720p": 73}},
-    "seedance 2.0 mini": {"rates": {"480p": 19, "720p": 41}},
-    "seedance 2.5": {"rates": {"480p": 56, "720p": 125, "1080p": 226}},
+    "seedance 2.0": {"rates": {"480p": 41, "720p": 92, "1080p": 205, "4K": 208}, "durations": (4, 15)},
+    "seedance 2.0 fast": {"rates": {"480p": 33, "720p": 73}, "durations": (4, 15)},
+    "seedance 2.0 mini": {"rates": {"480p": 19, "720p": 41}, "durations": (4, 15)},
+    "seedance 2.5": {"rates": {"480p": 56, "720p": 125, "1080p": 226}, "durations": (4, 30)},
     "grok imagine": {"per_second": (15, 38), "resolutions": ("480p", "720p", "1080p")},
-    "kling 3.0": {"per_second": (21, 41)},
+    "kling 3.0": {"per_second": (21, 41), "durations": (5, 10)},
     "kling 2.6 motion": {"per_second": (9, 14)},
     "kling 3.0 motion": {"per_second": (30, 41)},
     "kling ai avatar": {"per_second": (12, 24)},
     "kling ai avatar v2": {"per_second": (17, 35)},
-    "veo 3.1 fast": {"per_video": (90, 270)},
-    "veo 3.1 quality": {"per_video": (375, 555)},
+    "veo 3.1 fast": {"per_video": (90, 270), "duration_values": ("4", "6", "8")},
+    "veo 3.1 quality": {"per_video": (375, 555), "duration_values": ("4", "6", "8")},
 }
 
 # Мегапиксели кадра — для оценки цены промежуточных разрешений внутри известного диапазона.
@@ -103,6 +103,15 @@ def apply_doc_prices(spec):
         return spec
 
     info = VIDEO_PRICES.get(name)
+    if info and "duration" not in spec.options and ("durations" in info or "duration_values" in info):
+        # list_models и схема не дали длительностей — берём из документации, иначе в боте её не выбрать.
+        if "duration_values" in info:
+            values = info["duration_values"]
+        else:
+            lo, hi = info["durations"]
+            values = tuple(str(d) for d in (3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30) if lo <= d <= hi)
+        spec = dataclasses.replace(spec, options={**spec.options, "duration": values},
+                                   simple={**spec.simple, "duration": "5" if "5" in values else values[0]})
     if info and "rates" in info:
         rates = {k: float(v) for k, v in info["rates"].items()}
         options = dict(spec.options)
