@@ -194,3 +194,28 @@ def test_blocked_prompts(prompt):
 def test_allowed_prompt():
     assert check_prompt("кроссовки на белом фоне") is None
     assert check_prompt("  ") is not None
+
+
+# доплата mage за фото-референс, снято через estimate_cost с image_url
+MAGE_IMAGE_ESTIMATES = [
+    ("mage:gpt-image-2.5-flare", {"resolution": "1K", "quality": "low"}, 24),
+    ("mage:gpt-image-2.5-flare", {"resolution": "1K", "quality": "high"}, 332),
+    ("mage:gpt-image-2.5-flare", {"resolution": "2K", "quality": "low"}, 33),
+    ("mage:guava-2-pro", {"resolution": "1K"}, 53),
+    ("mage:lemon", {"resolution": "480p", "duration": "5"}, None),  # без доплаты
+]
+
+
+@pytest.mark.parametrize("key,params,gems", MAGE_IMAGE_ESTIMATES)
+def test_mage_reference_surcharge(key, params, gems):
+    cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
+    spec = cat.get(key)
+    expected = gems if gems is not None else cat.estimate_units(spec, params)
+    assert cat.estimate_units(spec, params, with_image=True) == expected
+
+
+def test_mage_reference_multiplier_not_cheaper():
+    # wan / ltx: с фото ≈ ×1.2, цена не должна быть ниже замера
+    cat = Catalog(Config(bot_token="x", mage_key="k"), list(MAGE_MODELS))
+    assert cat.estimate_units(cat.get("mage:wan22-video"), {"resolution": "480p"}, with_image=True) >= 195
+    assert cat.estimate_units(cat.get("mage:wan22-video"), {"resolution": "720p"}, with_image=True) >= 595

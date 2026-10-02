@@ -1,6 +1,7 @@
 """Каталог моделей: что можно выбрать в боте, параметры и оценка цены в кредитах."""
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 
@@ -36,6 +37,9 @@ class ModelSpec:
     # Цена за секунду по разрешению: {"480p": 81.6, "720p": 168}.
     rate_by_res: dict[str, float] = field(default_factory=dict)
     family: str = ""             # семейство для меню выбора (GPT Image, Seedance, Nano Banana…)
+    # Доплата за фото-референс: + image_surcharge единиц, затем × image_multiplier.
+    image_surcharge: float = 0.0
+    image_multiplier: float = 1.0
 
 
 def _durations(available: tuple[str, ...]) -> tuple[str, ...]:
@@ -201,6 +205,23 @@ MAGE_MODELS: tuple[ModelSpec, ...] = (
                V_WIDE, "first_image", "черновики", "LTX"),
 )
 
+# Доплата Mage за фото-референс (снято через estimate_cost): gems сверху или множитель.
+MAGE_IMAGE_SURCHARGE = {
+    "mage:gpt-image-2.5-flare": 15, "mage:gpt-image-2.5-sunburst": 15, "mage:gpt-image-2": 15,
+    "mage:guava-2": 5, "mage:guava-2-pro": 5,
+    "mage:grok-imagine-image": 3, "mage:grok-imagine-image-quality": 15, "mage:grok-imagine-image-2.0": 15,
+    "mage:flux2-dev": 5, "mage:sd-3-5-large": 5, "mage:grok-imagine-video": 3,
+}
+MAGE_IMAGE_MULTIPLIER = {  # стартовый кадр у Wan и LTX дороже примерно на 20%
+    "mage:wan22-video": 1.21, "mage:wan22-video-lightning": 1.21,
+    "mage:ltx-video-096-distilled": 1.21, "mage:ltx-video-096-dev": 1.21,
+}
+MAGE_MODELS = tuple(
+    dataclasses.replace(m, image_surcharge=float(MAGE_IMAGE_SURCHARGE.get(m.key, 0)),
+                        image_multiplier=MAGE_IMAGE_MULTIPLIER.get(m.key, 1.0))
+    for m in MAGE_MODELS
+)
+
 MOCK_MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("mock:image", "mock", "image", "Тестовая картинка", "mock", base_units=6,
               options={"aspect_ratio": ("1:1", "9:16")}, simple={"aspect_ratio": "1:1"}, image_field="image"),
@@ -256,8 +277,14 @@ class Catalog:
 
     # --- цены ---
 
-    def estimate_units(self, spec: ModelSpec, params: dict[str, str]) -> float:
-        """Стоимость у провайдера (gems / кредиты Vilva) при выбранных параметрах."""
+    def estimate_units(self, spec: ModelSpec, params: dict[str, str], with_image: bool = False) -> float:
+        """Стоимость у провайдера (gems / кредиты Vilva) при выбранных параметрах (и с фото-референсом)."""
+        units = self._units(spec, params)
+        if with_image and (spec.image_surcharge or spec.image_multiplier != 1.0):
+            units = float(math.ceil((units + spec.image_surcharge) * spec.image_multiplier - 1e-9))
+        return units
+
+    def _units(self, spec: ModelSpec, params: dict[str, str]) -> float:
         p = {**spec.simple, **params}
         if spec.rate_by_res:
             rate = spec.rate_by_res.get(p.get("resolution", ""), next(iter(spec.rate_by_res.values())))
@@ -311,8 +338,8 @@ class Catalog:
             prices = [self.price(spec, {})]
         return min(prices), max(prices)
 
-    def price(self, spec: ModelSpec, params: dict[str, str]) -> int:
-        return self.credits(spec, self.estimate_units(spec, params))
+    def price(self, spec: ModelSpec, params: dict[str, str], with_image: bool = False) -> int:
+        return self.credits(spec, self.estimate_units(spec, params, with_image))
 
 
 def build_catalog(cfg: Config) -> Catalog:

@@ -154,9 +154,14 @@ def kind_panel(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardMa
     if quick:
         rows.append(quick)
     rows.append([InlineKeyboardButton(text="🧪 Ещё настройки", callback_data=f"sx:{kind}")])
-    price = app.catalog.price(spec, params)
     example = EXAMPLES[kind][user_id % len(EXAMPLES[kind])]
+    price = app.catalog.price(spec, params)
     photo_hint = "изменю его" if kind == "image" else "оживлю его"
+    with_photo = app.catalog.price(spec, params, with_image=True)
+    if spec.image_field and with_photo != price:
+        photo_hint += f" (с фото — {with_photo} кр)"
+    elif not spec.image_field:
+        photo_hint = "эта модель работает только с текстом"
     title = "🖼 <b>Картинка</b>" if kind == "image" else "🎬 <b>Видео</b>"
     note = f"\n<i>{html.escape(spec.note)}</i>" if spec.note else ""
     text = (f"{title}\n\n"
@@ -165,7 +170,7 @@ def kind_panel(app: App, user_id: int, kind: str) -> tuple[str, InlineKeyboardMa
             f"💎 Стоимость: <b>{price} кр</b> · на балансе {app.db.balance(user_id)} кр\n\n"
             f"✍️ Напиши, что {'нарисовать' if kind == 'image' else 'снять'}, например:\n"
             f"<i>«{example}»</i>\n"
-            f"📎 Или пришли фото с подписью — {photo_hint}")
+            f"📎 {'Или пришли фото с подписью — ' if spec.image_field else ''}{photo_hint}")
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -784,7 +789,7 @@ async def generate(app: App, bot: Bot, message: Message, kind: str, prompt: str,
         await message.answer("Подожди, предыдущая генерация ещё идёт")
         return
     params = params_of(app, s, spec)
-    cost = app.catalog.price(spec, params)
+    cost = app.catalog.price(spec, params, with_image=image is not None)
     try:
         gen_id = app.db.charge(user.id, kind, prompt, cost)
     except InsufficientCredits:
