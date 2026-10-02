@@ -574,9 +574,16 @@ def test_vilva_doc_prices():
     seed = apply_doc_prices(ModelSpec("vilva:s", "vilva", "video", "Seedance 2.0", "s", base_units=1000,
                                       options={"resolution": ("480p", "720p", "1080p"), "duration": ("5", "10")},
                                       simple={"resolution": "480p", "duration": "5"}))
-    assert cat.estimate_units(seed, {"resolution": "480p", "duration": "5"}) == 90
-    assert cat.estimate_units(seed, {"resolution": "1080p", "duration": "10"}) == 1530
-    assert 300 < cat.estimate_units(seed, {"resolution": "720p", "duration": "10"}) < 1530
+    # цены из интерфейса Vilva: 480p 4с = 164, 5с = 205; 720p 5с = 460; 1080p 4с = 820
+    assert cat.estimate_units(seed, {"resolution": "480p", "duration": "4"}) == 164
+    assert cat.estimate_units(seed, {"resolution": "480p", "duration": "5"}) == 205
+    assert cat.estimate_units(seed, {"resolution": "720p", "duration": "5"}) == 460
+    assert cat.estimate_units(seed, {"resolution": "1080p", "duration": "4"}) == 820
+    s25 = apply_doc_prices(ModelSpec("vilva:s25", "vilva", "video", "Seedance 2.5", "s25", base_units=1))
+    assert cat.estimate_units(s25, {"resolution": "1080p", "duration": "5"}) == 1130
+    assert cat.estimate_units(s25, {"resolution": "720p", "duration": "4"}) == 500
+    mini = apply_doc_prices(ModelSpec("vilva:m", "vilva", "video", "Seedance 2.0 Mini", "m", base_units=1))
+    assert cat.estimate_units(mini, {"resolution": "720p", "duration": "4"}) == 164
     # цена меняется от длительности и разрешения — не фиксированная
     assert len({cat.price(seed, {"resolution": r, "duration": d}) for r in ("480p", "1080p") for d in ("5", "10")}) == 4
     veo = apply_doc_prices(ModelSpec("vilva:v", "vilva", "video", "Veo 3.1 Fast", "v", base_units=1000))

@@ -36,9 +36,12 @@ IMAGE_PRICES: dict[str, dict] = {
 }
 
 # Видео: кредиты в секунду (диапазон от младшего разрешения к старшему) или за ролик.
+# "rates" — точные ставки за секунду, снятые в интерфейсе Vilva (ролик 4 и 5 сек), имеют приоритет.
 VIDEO_PRICES: dict[str, dict] = {
-    "seedance 2.0": {"per_second": (18, 153), "resolutions": ("480p", "720p", "1080p")},
-    "seedance 2.0 fast": {"per_second": (14, 50), "resolutions": ("480p", "720p")},
+    "seedance 2.0": {"rates": {"480p": 41, "720p": 92, "1080p": 205, "4K": 208}},
+    "seedance 2.0 fast": {"rates": {"480p": 33, "720p": 73}},
+    "seedance 2.0 mini": {"rates": {"480p": 19, "720p": 41}},
+    "seedance 2.5": {"rates": {"480p": 56, "720p": 125, "1080p": 226}},
     "grok imagine": {"per_second": (15, 38), "resolutions": ("480p", "720p", "1080p")},
     "kling 3.0": {"per_second": (21, 41)},
     "kling 2.6 motion": {"per_second": (9, 14)},
@@ -100,6 +103,20 @@ def apply_doc_prices(spec):
         return spec
 
     info = VIDEO_PRICES.get(name)
+    if info and "rates" in info:
+        rates = {k: float(v) for k, v in info["rates"].items()}
+        options = dict(spec.options)
+        known = options.get("resolution")
+        if known:
+            # Сопоставляем регистр разрешений из list_models (4k / 4K).
+            by_low = {k.lower(): v for k, v in rates.items()}
+            rates = {r: by_low[r.lower()] for r in known if r.lower() in by_low} or rates
+        options["resolution"] = tuple(rates)
+        simple = dict(spec.simple)
+        if simple.get("resolution") not in rates:
+            simple["resolution"] = options["resolution"][0]
+        return dataclasses.replace(spec, rate_by_res=rates, per_second=0.0, options=options, simple=simple,
+                                   price_table={}, base_units=float(round(rates[simple["resolution"]] * 5)))
     if not info or spec.rate_by_res or spec.per_second:
         return spec
     resolutions = spec.options.get("resolution") or info.get("resolutions") or ()
