@@ -39,6 +39,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "resolution": ("resolution", "quality", "size"),
     "duration": ("duration", "durationSeconds", "seconds", "length"),
     "seed": ("seed",),
+    "effort": ("effort", "quality", "reasoningEffort"),
     "generation_id": ("generationId", "generation_id", "id"),
     "run_id": ("runId", "run_id", "id"),
     "mode": ("mode", "runMode", "run_mode"),
@@ -254,6 +255,7 @@ class VilvaProvider:
     async def discover_models(self) -> list:
         """Модели из list_models с ценами; параметры — из enum в схемах generate_*."""
         from ..catalog import ModelSpec
+        from ..vilva_prices import apply_doc_prices
 
         schemas = await self.client.list_tools()
         data = payload(await self.client.call_tool("list_models", {}))
@@ -284,14 +286,14 @@ class VilvaProvider:
                 simple["duration"] = "5" if "5" in options["duration"] else options["duration"][0]
             refs = item.get("maxReferenceImages")
             accepts = _accepts_image(schemas.get(tool)) or (isinstance(refs, int) and refs > 0)
-            specs.append(ModelSpec(
+            specs.append(apply_doc_prices(ModelSpec(
                 key=f"vilva:{mid}", provider="vilva", kind=kind,
                 title=str(item.get("displayName") or item.get("name") or item.get("title") or mid), arch=mid,
                 base_units=base or 1.0, options=options, simple=simple,
                 image_field="image" if accepts or kind == "video" else None,
                 note=str(item.get("description") or "")[:80],
                 price_table=table, per_second=per_second, rate_by_res=rate_by_res,
-            ))
+            )))
         return specs
 
     # --- генерация ---

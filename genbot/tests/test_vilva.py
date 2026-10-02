@@ -557,3 +557,27 @@ def test_vilva_per_second_by_resolution():
     cat = Catalog(Config(bot_token="x"), [spec])
     assert cat.estimate_units(spec, {"resolution": "1080p", "duration": "10"}) == 400
     assert cat.estimate_units(spec, {}) == 100
+
+
+def test_vilva_doc_prices():
+    from bot.catalog import Catalog, ModelSpec
+    from bot.config import Config
+    from bot.vilva_prices import apply_doc_prices
+
+    cat = Catalog(Config(bot_token="x"), [])
+    gpt2 = apply_doc_prices(ModelSpec("vilva:gpt-image-2", "vilva", "image", "GPT Image 2", "gpt-image-2", base_units=9))
+    assert cat.estimate_units(gpt2, {"resolution": "2K", "effort": "high"}) == 266
+    assert cat.estimate_units(gpt2, {"resolution": "1K", "effort": "low"}) == 5
+    assert gpt2.options["effort"] == ("auto", "low", "medium", "high")
+    flare = apply_doc_prices(ModelSpec("vilva:f", "vilva", "image", "GPT Image 2.5 Flare", "f", base_units=9))
+    assert cat.estimate_units(flare, {"resolution": "4K"}) == 24
+    seed = apply_doc_prices(ModelSpec("vilva:s", "vilva", "video", "Seedance 2.0", "s", base_units=1000,
+                                      options={"resolution": ("480p", "720p", "1080p"), "duration": ("5", "10")},
+                                      simple={"resolution": "480p", "duration": "5"}))
+    assert cat.estimate_units(seed, {"resolution": "480p", "duration": "5"}) == 90
+    assert cat.estimate_units(seed, {"resolution": "1080p", "duration": "10"}) == 1530
+    assert 300 < cat.estimate_units(seed, {"resolution": "720p", "duration": "10"}) < 1530
+    # цена меняется от длительности и разрешения — не фиксированная
+    assert len({cat.price(seed, {"resolution": r, "duration": d}) for r in ("480p", "1080p") for d in ("5", "10")}) == 4
+    veo = apply_doc_prices(ModelSpec("vilva:v", "vilva", "video", "Veo 3.1 Fast", "v", base_units=1000))
+    assert cat.estimate_units(veo, {}) == 270

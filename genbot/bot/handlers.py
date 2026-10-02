@@ -50,6 +50,7 @@ PARAM_LABELS = {
     "duration": "Длительность, сек",
     "audio": "Звук",
     "quality": "Качество",
+    "effort": "Effort",
 }
 VALUE_LABELS = {"true": "вкл", "false": "выкл"}
 KIND_LABEL = {"image": "картинок", "video": "видео"}
@@ -534,7 +535,7 @@ async def cmd_prices(message: Message, app: App) -> None:
         lines.append("🖼 Картинки" if kind == "image" else "\n🎬 Видео")
         for m in sorted_models(app, kind):
             base = {k: v for k, v in m.simple.items() if k in m.options}
-            top = {k: v[-1] for k, v in m.options.items() if k in ("resolution", "duration", "quality")}
+            top = {k: v[-1] for k, v in m.options.items() if k in ("resolution", "duration", "quality", "effort")}
             unit = "gems" if m.provider == "mage" else "кр Vilva"
             for label, params in (("база", base), ("макс", {**base, **top})):
                 u = app.catalog.estimate_units(m, params)
