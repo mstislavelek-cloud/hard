@@ -635,3 +635,12 @@ def test_vilva_error_codes():
     assert _error_code("Insufficient credits. Required: 625, Available: 100") == "insufficient_credits"
     assert _error_code("Not enough credits") == "insufficient_credits"
     assert _error_code("Model not found") == "tool_error"
+
+
+def test_vilva_kling_tiers_and_utilities():
+    from bot.providers.vilva import _is_utility, _rates_for_resolutions
+
+    rates = {"std": 26.0, "std-audio": 38.0, "pro": 34.0, "pro-audio": 51.0, "4K": 126.0, "4K-audio": 126.0}
+    assert _rates_for_resolutions(rates, ("720p", "1080p", "4k")) == {"720p": 38.0, "1080p": 51.0, "4k": 126.0}
+    assert _rates_for_resolutions({"480p": 1.0}, ("480p",)) == {"480p": 1.0}
+    assert _is_utility("topaz-upscale") and _is_utility("heygen-lipsync-speed") and not _is_utility("seedance-2-5")

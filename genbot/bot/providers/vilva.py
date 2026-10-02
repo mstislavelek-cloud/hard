@@ -338,6 +338,9 @@ class VilvaProvider:
                 simple["resolution"] = options["resolution"][0]
             if "duration" in options:
                 simple["duration"] = "5" if "5" in options["duration"] else options["duration"][0]
+            if _is_utility(mid):
+                continue
+            rate_by_res = _rates_for_resolutions(rate_by_res, options.get("resolution", ()))
             refs = item.get("maxReferenceImages")
             accepts = _accepts_image(schemas.get(tool)) or (isinstance(refs, int) and refs > 0)
             specs.append(apply_doc_prices(ModelSpec(
@@ -646,6 +649,34 @@ def _model_kind(item: dict) -> str:
 def _camel(s: str) -> str:
     head, *rest = s.split("_")
     return head + "".join(p.title() for p in rest)
+
+
+# Инструменты Vilva, которым нужен исходник (видео, аудио, фото для апскейла) — в выборе моделей не показываем.
+UTILITY_MODELS = ("remove-background", "upscale", "heygen-translate", "heygen-lipsync", "heygen-avatar",
+                  "bytedance-asset", "video-edit", "video-extend", "motion-control", "kling-avatar")
+
+
+def _is_utility(model_id: str) -> bool:
+    return any(u in model_id for u in UTILITY_MODELS)
+
+
+# Тарифы Kling называются std/pro/4K, а не разрешениями; со звуком дороже — берём ставку со звуком (не в минус).
+TIER_RES = {"std": "720p", "pro": "1080p", "4k": "4k"}
+
+
+def _rates_for_resolutions(rates: dict[str, float], resolutions) -> dict[str, float]:
+    if not rates or not resolutions or any(r in rates for r in resolutions):
+        return rates
+    out: dict[str, float] = {}
+    for key, rate in rates.items():
+        tier = key.lower().removesuffix("-audio")
+        res = TIER_RES.get(tier)
+        if res:
+            match = next((r for r in resolutions if r.lower() == res), res)
+            out[match] = max(out.get(match, 0.0), rate)
+    if "default" in rates:
+        out.setdefault("default", rates["default"])
+    return out or rates
 
 
 NICE_DURATIONS = (3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30)

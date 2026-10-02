@@ -351,7 +351,10 @@ class Catalog:
     def _units(self, spec: ModelSpec, params: dict[str, str]) -> float:
         p = {**spec.simple, **params}
         if spec.rate_by_res:
-            rate = spec.rate_by_res.get(p.get("resolution", ""), next(iter(spec.rate_by_res.values())))
+            rates = spec.rate_by_res
+            res = p.get("resolution", "")
+            # Неизвестное разрешение — по самой дорогой ставке: лишнее вернётся по факту, в минус не уйдём.
+            rate = rates.get(res) or rates.get(res.lower()) or rates.get("default") or max(rates.values())
             try:
                 return float(math.ceil(rate * float(p.get("duration", 5)) - 1e-9))
             except ValueError:
